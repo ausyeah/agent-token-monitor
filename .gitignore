@@ -1,0 +1,52 @@
+# Python / build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# PyInstaller output
+/build/
+/dist/
+*.manifest
+*.spec.bak
+
+# Local runtime data and user-specific state
+*.db
+*.sqlite
+*.sqlite3
+*.log
+/config.json
+/monitor-status.json
+/oc.json
+/models.dev.all.json
+
+# Generated CSV exports
+/csv/
+*.csv
+
+# Local screenshots and temporary files
+*.bmp
+*.tmp
+*.bak
+*.log
+._*
+/._*
+
+# Editor / OS files
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Keep the release screenshots and source icon tracked.
+!/assets/
+!/docs/
+!/docs/screenshots/

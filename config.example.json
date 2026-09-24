@@ -1,0 +1,23 @@
+{
+  "opencode_db": "",
+  "sample_interval_seconds": 300,
+  "daily_alert_tokens": 10000000,
+  "spike_window_minutes": 30,
+  "spike_alert_tokens": 10000000,
+  "color_max_tokens": 100000000,
+  "notifications": true,
+  "sound": true,
+  "auto_start": true,
+  "full_reconcile_hours": 24,
+  "ui_theme": "dark",
+  "use_model_dev_pricing": true,
+  "pricing_refresh_hours": 24,
+  "pricing_mode": "official",
+  "pricing_multiplier": 1.0,
+  "display_currency": "USD",
+  "usd_cny_rate": 7.20,
+  "custom_pricing": {
+    "default": {},
+    "models": []
+  }
+}
