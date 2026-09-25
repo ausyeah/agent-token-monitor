@@ -26,7 +26,7 @@ from PIL import Image, ImageDraw
 
 APP_NAME = "OpenCode Token Monitor"
 APP_ID = "OpenCode.TokenMonitor"
-VERSION = "3.0.3"
+VERSION = "3.0.4"
 DEFAULT_WINDOW_WIDTH = 700
 DEFAULT_WINDOW_HEIGHT = 700
 MUTEX_NAME = "Local\\OpenCodeTokenMonitorSingleton"

@@ -165,8 +165,8 @@
     .cache-segment.input { background: #6f9cf4; }
     .cache-segment.output { background: #73c69a; }
     .cache-segment.reasoning { background: #b18be8; }
-    .cache-segment.cache-read { background: #e1aa68; }
-    .cache-segment.cache-write { background: #d57e91; }
+    .cache-segment.cache_read { background: #e1aa68; }
+    .cache-segment.cache_write { background: #d57e91; }
     .cache-legend { display: flex; flex-wrap: wrap; gap: 8px 15px; margin: 9px 0 0 74px; color: var(--muted); font-size: 10px; }
     .cache-legend span { display: inline-flex; align-items: center; gap: 5px; }
     .cache-legend i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
@@ -176,6 +176,11 @@
     .cache-legend .cache-read { background: #e1aa68; }
     .cache-legend .cache-write { background: #d57e91; }
     .cache-empty { color: var(--subtle); font-size: 11px; padding: 8px 0; }
+    .compact-cache-row { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border-soft); }
+    .compact-cache-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 7px; color: var(--muted); font-size: 11px; }
+    .compact-cache-head strong { color: var(--success); font-size: 11px; white-space: nowrap; }
+    .compact-cache-legend { margin: 7px 0 0; gap: 5px 10px; font-size: 9px; }
+    .compact-cache-legend b { color: var(--text-soft); font-weight: 400; }
     .pulse-strip { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; margin: 0 0 14px; }
     .pulse-item { padding: 13px 15px; background: var(--surface); border: 1px solid var(--border); border-radius: 15px; }
     .pulse-item span { color: var(--muted); font-size: 10px; }
@@ -498,6 +503,7 @@
           <article class="card compact-hero">
             <div class="compact-top"><div><div class="scope-line"><span class="scope-mark"></span><span id="compact-scope">全部供应商</span></div><div id="compact-total" class="compact-number">—</div><div class="compact-caption">当前周期 Token · 悬停趋势查看详情</div></div><button id="expand-button" class="icon-button" title="扩大窗口"><svg class="icon" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5"/></svg></button></div>
             <div class="compact-stats"><div class="compact-stat"><span>请求次数</span><strong id="compact-requests">—</strong></div><div class="compact-stat"><span>参考成本</span><strong id="compact-cost">—</strong></div><div class="compact-stat"><span>缓存读取</span><strong id="compact-cache">—</strong></div><div class="compact-stat"><span>缓存命中率</span><strong id="compact-hit">—</strong></div></div>
+            <div class="compact-cache-row"><div class="compact-cache-head"><span>Token 构成</span><strong id="compact-cache-hit">命中 0.0%</strong></div><div id="compact-cache-stack" class="cache-stack" role="img" aria-label="紧凑 Token 构成比例"></div><div id="compact-cache-legend" class="cache-legend compact-cache-legend"><span><i class="input"></i>输入 <b data-cache-value="input">—</b></span><span><i class="output"></i>输出 <b data-cache-value="output">—</b></span><span><i class="reasoning"></i>推理 <b data-cache-value="reasoning">—</b></span><span><i class="cache-read"></i>缓存读取 <b data-cache-value="cache_read">—</b></span><span><i class="cache-write"></i>缓存写入 <b data-cache-value="cache_write">—</b></span></div></div>
           </article>
 
            <div class="compact-breakdown-grid"><article class="card compact-list"><div class="section-head"><div><h2 class="section-title">供应商</h2><div class="section-subtitle">Token 使用排行</div></div></div><div id="compact-providers"></div></article><article class="card compact-list"><div class="section-head"><div><h2 class="section-title">模型</h2><div class="section-subtitle">Token 使用排行</div></div></div><div id="compact-models"></div></article></div>
@@ -631,6 +637,16 @@
       }
       function fillSelect(select, values, selected) { select.innerHTML = values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join(""); select.value = values.includes(selected) ? selected : values[0]; }
       function renderCurrent() { if (!state.data) return; if (state.view === "overview") renderOverview(state.data); else renderDetail(state.data); }
+      function renderTokenStack(selector, summary, parts) {
+        const stack = $(selector); if (!stack) return;
+        const total = Number(summary.total_with_cache || parts.reduce((sum, part) => sum + Number(summary[part[2]] || 0), 0)) || 1;
+        stack.innerHTML = parts.map(([key, label, field]) => {
+          const value = Number(summary[field] || 0);
+          const width = Math.max(0, Math.min(100, value / total * 100));
+          return `<span class="cache-segment ${key}" style="width:${width}%" title="${label}：${compactFmt(value)}（${width.toFixed(1)}%）"></span>`;
+        }).join("");
+        stack.setAttribute("aria-label", parts.map(([key, label, field]) => `${label} ${compactFmt(summary[field] || 0)}`).join("，"));
+      }
       function renderOverview(data) {
         const s = data.summary || {}; const scope = state.model || state.provider || "全部供应商"; const hit = cacheRate(s);
         setText("#scope-label", scope); setText("#compact-scope", scope); setText("#total-token", compactFmt(s.total_with_cache)); setText("#compact-total", compactFmt(s.total_with_cache));
@@ -642,12 +658,11 @@
         const costDisplay=costIsFree?"免费":(pricingConfig.mode==="custom"&&Number(s.total_cost||0)===0&&Number(s.exact_pricing_coverage||0)<1?"未定价":moneyFmt(s.total_cost));
         setText("#request-count", fmt(s.requests)); setText("#compact-requests", fmt(s.requests)); setText("#cost-total", costDisplay); setText("#compact-cost", costDisplay);
         setText("#cost-breakdown", costIsFree?`当前周期为免费/零价模型 · 账单 ${moneyFmt(s.billed_cost)}`:pricingConfig.mode==="custom"?`自定义估算 · 输入/输出/缓存单价可在价格设置中修改`:`账单 ${moneyFmt(s.billed_cost)} · 参考估算 ${moneyFmt(s.estimated_cost)} · 精确 ${Number(s.exact_pricing_coverage || 0).toFixed(1)}%`);
-        setText("#hit-rate-hero", `${hit.toFixed(1)}%`); setText("#hit-rate", `命中 ${hit.toFixed(1)}%`); setText("#compact-hit", `${hit.toFixed(1)}%`); setText("#plain-total", compactFmt(s.total_without_cache_read)); setText("#compact-cache", compactFmt(s.cache_read_tokens));
+        setText("#hit-rate-hero", `${hit.toFixed(1)}%`); setText("#hit-rate", `命中 ${hit.toFixed(1)}%`); setText("#compact-cache-hit", `命中 ${hit.toFixed(1)}%`); setText("#compact-hit", `${hit.toFixed(1)}%`); setText("#plain-total", compactFmt(s.total_without_cache_read)); setText("#compact-cache", compactFmt(s.cache_read_tokens));
         const tokenParts=[["input","输入","input_tokens"],["output","输出","output_tokens"],["reasoning","推理","reasoning_tokens"],["cache_read","缓存读取","cache_read_tokens"],["cache_write","缓存写入","cache_write_tokens"]];
-         const tokenTotal=Number(s.total_with_cache||tokenParts.reduce((sum,part)=>sum+Number(s[part[2]]||0),0))||1;
-         $("#cache-stack").innerHTML=tokenParts.map(([key,label,field])=>{const value=Number(s[field]||0);const width=Math.max(0,Math.min(100,value/tokenTotal*100));return `<span class="cache-segment ${key}" style="width:${width}%" title="${label}：${compactFmt(value)}（${width.toFixed(1)}%）"></span>`;}).join("");
-         $("#cache-stack").setAttribute("aria-label",tokenParts.map(([key,label,field])=>`${label} ${compactFmt(s[field]||0)}`).join("，"));
-         $$('[data-cache-value]').forEach(node=>{const key=node.dataset.cacheValue;const field=tokenParts.find(part=>part[0]===key)?.[2];node.textContent=compactFmt(s[field]||0);});
+        renderTokenStack("#cache-stack", s, tokenParts);
+        renderTokenStack("#compact-cache-stack", s, tokenParts);
+        $$('[data-cache-value]').forEach(node=>{const key=node.dataset.cacheValue;const field=tokenParts.find(part=>part[0]===key)?.[2];node.textContent=compactFmt(s[field]||0);});
         const metrics = [["输入 Token","input_tokens"],["输出 Token","output_tokens"],["推理 Token","reasoning_tokens"],["缓存读取","cache_read_tokens"],["缓存写入","cache_write_tokens"],["不含缓存读取","total_without_cache_read"]];
         $("#metric-grid").innerHTML = metrics.map(([label,key]) => `<div class="metric"><div class="metric-label"><span class="metric-mark"></span>${label}</div><div class="metric-value">${compactFmt(s[key])}</div></div>`).join("");
         const unit = data.granularity === "hour" ? "按小时" : "按天"; const caption = `${({today:"今日","24h":"最近24小时","7d":"7天","30d":"30天","90d":"90天",all:"全部",custom:"自定义"})[state.period]} · ${unit}`;
