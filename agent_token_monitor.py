@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -24,15 +25,45 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
-APP_NAME = "OpenCode Token Monitor"
-APP_ID = "OpenCode.TokenMonitor"
-VERSION = "3.0.5"
-DEFAULT_WINDOW_WIDTH = 700
-DEFAULT_WINDOW_HEIGHT = 700
-MUTEX_NAME = "Local\\OpenCodeTokenMonitorSingleton"
-SYNC_MUTEX_NAME = "Local\\OpenCodeTokenMonitorDataWriter"
+APP_NAME = "Agent Token Monitor"
+APP_ID = "Agent.TokenMonitor"
+DATA_DIR_NAME = "AgentTokenMonitor"
+VERSION = "4.0.0"
+# Default window size. Chosen so the overview card, the period buttons and
+# both filter dropdowns are all visible without scrolling on a 1080p display.
+DEFAULT_WINDOW_WIDTH = 985
+DEFAULT_WINDOW_HEIGHT = 975
+MUTEX_NAME = "Local\\AgentTokenMonitorSingleton"
+SYNC_MUTEX_NAME = "Local\\AgentTokenMonitorDataWriter"
 PROCESS_POLL_SECONDS = 2.0
+# How stale the local index may get before an open Dashboard triggers a sync.
+# Kept well below the tray interval so a visible window tracks live usage.
+DASHBOARD_SYNC_MAX_AGE_SECONDS = 20
 OPENCODE_PROCESS_NAMES = frozenset({"opencode.exe", "opencode-cli.exe", "opencode-desktop.exe"})
+WORKBUDDY_PROCESS_NAMES = frozenset({"workbuddy.exe", "workbuddyai.exe"})
+WORKBUDDY_PROVIDER_ID = "workbuddy"
+WORKBUDDY_SOURCE = "workbuddy"
+WORKBUDDY_SOURCE_RANK = 3
+WORKBUDDY_CUSTOM_PREFIX = "custom-local:"
+DSH_PROCESS_NAMES = frozenset({"deepseek harness.exe", "dsh.exe", "deepseeharness.exe"})
+DSH_PROVIDER_ID = "deepseek-harness"
+DSH_SOURCE = "dsh"
+DSH_SOURCE_RANK = 4
+
+# Dashboard "source" selector values mapped to the raw ``usage_events.source``
+# values they cover. An empty selection means "all sources", which keeps the
+# original single-source behaviour intact.
+SOURCE_GROUPS: dict[str, tuple[str, ...]] = {
+    "opencode": ("v1", "v2"),
+    WORKBUDDY_SOURCE: (WORKBUDDY_SOURCE,),
+    DSH_SOURCE: (DSH_SOURCE,),
+}
+SOURCE_LABELS: dict[str, str] = {
+    "opencode": "OpenCode",
+    WORKBUDDY_SOURCE: "WorkBuddy",
+    DSH_SOURCE: "DeepSeek Harness",
+}
+SOURCE_ORDER: tuple[str, ...] = ("opencode", WORKBUDDY_SOURCE, DSH_SOURCE)
 DASHBOARD_WINDOW: Any = None
 PRICING_MEMORY: dict[str, Any] = {}
 PRICING_MEMORY_META: dict[str, Any] = {}
@@ -71,6 +102,10 @@ LEDGER_CSV_HEADER = (
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "opencode_db": "",
+    "workbuddy_enabled": True,
+    "workbuddy_root": "",
+    "dsh_enabled": True,
+    "dsh_root": "",
     "sample_interval_seconds": 300,
     "daily_alert_tokens": 10_000_000,
     "spike_window_minutes": 30,
@@ -96,7 +131,84 @@ def app_data_dir() -> Path:
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
     else:
         base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return base / DATA_DIR_NAME
+
+
+def legacy_data_dir() -> Path:
+    """Data directory used before the multi-agent rename."""
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
     return base / "OpenCodeTokenMonitor"
+
+
+def _copy_sqlite(source: Path, destination: Path) -> None:
+    """Copy a SQLite file through its backup API.
+
+    A plain file copy can capture a database while it is mid-write, and it
+    ignores the WAL sidecar files, which silently produces an empty or partial
+    copy. The online backup always yields a consistent snapshot even when the
+    source is still open in another process.
+    """
+    src = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True, timeout=10)
+    try:
+        dst = sqlite3.connect(destination)
+        try:
+            with dst:
+                src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+
+def migrate_legacy_data() -> str | None:
+    """Move an OpenCode-only data directory to the renamed one, once.
+
+    The 4.0 rename turned a single-source tool into a multi-agent one, so the
+    old directory name is now misleading. Existing statistics, pricing config
+    and CSV exports are carried over instead of being silently abandoned.
+    Returns the migrated directory when a move happened.
+    """
+    target = app_data_dir()
+    legacy = legacy_data_dir()
+    if legacy == target or not legacy.is_dir():
+        return None
+    # A marker file makes this idempotent and prevents a second import from
+    # overwriting data that already lives in the new directory.
+    marker = target / ".migrated-from-opencodetokenmonitor"
+    if marker.exists():
+        return None
+    try:
+        # The target may not exist yet on a first run after the rename.
+        if not target.exists() or not any(target.iterdir()):
+            target.mkdir(parents=True, exist_ok=True)
+            for item in legacy.iterdir():
+                destination = target / item.name
+                if destination.exists():
+                    continue
+                try:
+                    if item.suffix == ".db":
+                        _copy_sqlite(item, destination)
+                    elif item.is_dir():
+                        shutil.copytree(item, destination)
+                    else:
+                        shutil.copy2(item, destination)
+                except (OSError, sqlite3.Error) as exc:
+                    logging.getLogger("opencode-token-monitor").warning(
+                        "Could not migrate %s: %s", item.name, exc
+                    )
+            marker.write_text(
+                f"Migrated from {legacy} on "
+                f"{datetime.now().astimezone().isoformat(timespec='seconds')}\n",
+                encoding="utf-8",
+            )
+            return str(target)
+    except OSError:
+        # Migration is a convenience; never block startup on it.
+        return None
+    return None
 
 
 def executable_path() -> Path:
@@ -306,17 +418,69 @@ def detect_opencode_db(config: dict[str, Any]) -> Path:
     raise FileNotFoundError("OpenCode database not found; set opencode_db in config.json")
 
 
+def detect_workbuddy_root(config: dict[str, Any]) -> Path | None:
+    """Locate the WorkBuddy data directory that holds per-session JSONL logs.
+
+    Only the data directory is read. No WorkBuddy CLI is invoked and no
+    request is made to the WorkBuddy backend.
+    """
+    if not config.get("workbuddy_enabled", True):
+        return None
+    candidates: list[Path] = []
+    configured = str(config.get("workbuddy_root") or "").strip()
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    home = Path.home()
+    candidates.extend(
+        [
+            home / ".workbuddy",
+            home / ".workbuddy-ai",
+        ]
+    )
+    for candidate in candidates:
+        if (candidate / "projects").is_dir():
+            return candidate.resolve()
+    return None
+
+
+def detect_dsh_root(config: dict[str, Any]) -> Path | None:
+    """Locate the DeepSeek Harness data directory holding session logs.
+
+    DeepSeek Harness writes zstd-compressed event logs per session under
+    ``<root>/sessions/<workspace>/session-<id>/session.v<N>.jsonl.zstd``.
+    """
+    if not config.get("dsh_enabled", True):
+        return None
+    candidates: list[Path] = []
+    configured = str(config.get("dsh_root") or "").strip()
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.append(Path.home() / ".dsh")
+    for candidate in candidates:
+        if (candidate / "sessions").is_dir():
+            return candidate.resolve()
+    return None
+
+
 def is_opencode_process_name(name: str) -> bool:
     return name.strip().lower() in OPENCODE_PROCESS_NAMES
 
 
-def opencode_is_running() -> bool:
-    """Return whether an OpenCode CLI or desktop process is currently running.
+def is_workbuddy_process_name(name: str) -> bool:
+    return name.strip().lower() in WORKBUDDY_PROCESS_NAMES
 
-    This checks Windows process names only. It never opens or queries the
-    OpenCode database, so the tray can remain idle cheaply while OpenCode is
-    closed. The desktop background service is named ``opencode-cli.exe`` and
-    the desktop application itself is named ``OpenCode.exe``.
+
+def is_dsh_process_name(name: str) -> bool:
+    return name.strip().lower() in DSH_PROCESS_NAMES
+
+
+def _any_process_running(names: frozenset[str]) -> bool:
+    """Return whether any process in ``names`` is currently running.
+
+    This checks Windows process names only. It never opens or queries a source
+    database, so the tray can remain idle cheaply while every monitored app is
+    closed. OpenCode ships ``opencode-cli.exe`` / ``opencode-desktop.exe``;
+    WorkBuddy ships ``WorkBuddy.exe``.
     """
     if os.name != "nt":
         return True
@@ -347,12 +511,29 @@ def opencode_is_running() -> bool:
         if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
             return False
         while True:
-            if is_opencode_process_name(entry.szExeFile):
+            if entry.szExeFile.strip().lower() in names:
                 return True
             if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
                 return False
     finally:
         kernel32.CloseHandle(snapshot)
+
+
+def opencode_is_running() -> bool:
+    return _any_process_running(OPENCODE_PROCESS_NAMES)
+
+
+def workbuddy_is_running() -> bool:
+    return _any_process_running(WORKBUDDY_PROCESS_NAMES)
+
+
+def dsh_is_running() -> bool:
+    return _any_process_running(DSH_PROCESS_NAMES)
+
+
+def any_source_running() -> bool:
+    """True when at least one monitored application is running."""
+    return opencode_is_running() or workbuddy_is_running() or dsh_is_running()
 
 
 def shutil_which(name: str) -> str | None:
@@ -711,18 +892,104 @@ class Store:
             provider, model, variant = (str(row[0] or ""), str(row[1] or ""), str(row[2] or ""))
             label = f"{provider}/{model}" + (f" · {variant}" if variant and variant != "default" else "")
             models.append({"provider": provider, "model": model, "variant": variant, "label": label})
-        return {"providers": providers, "models": models}
+        return {"providers": providers, "models": models, "sources": self.source_options()}
+
+    def sources_in_range(self, start_ms: int, end_ms: int) -> list[str]:
+        """Return the distinct raw ``source`` values recorded in a time range."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT source FROM usage_events WHERE event_time >= ? AND event_time < ? AND source <> ''",
+            (int(start_ms), int(end_ms)),
+        ).fetchall()
+        return sorted(str(row[0]) for row in rows)
+
+    def source_health_report(self, probe: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+        """Report source availability for the Dashboard.
+
+        Combines what is actually recorded with the result of the latest read
+        probe, so a source that is configured but unreadable, or that has a
+        schema this build cannot parse, is surfaced instead of silently looking
+        like "no usage".
+        """
+        probe = probe or {}
+        report: dict[str, Any] = {}
+        for key in SOURCE_ORDER:
+            raw_sources = SOURCE_GROUPS.get(key, (key,))
+            placeholders = ",".join("?" for _ in raw_sources)
+            row = self.conn.execute(
+                f"SELECT COUNT(*),MAX(event_time) FROM usage_events WHERE source IN ({placeholders})",
+                list(raw_sources),
+            ).fetchone()
+            events = safe_int(row[0])
+            entry = dict(probe.get(key) or {})
+            available = bool(entry.get("available", True))
+            report[key] = {
+                "label": SOURCE_LABELS.get(key, key),
+                "events": events,
+                "last_event": safe_int(row[1]),
+                # A failed probe is authoritative even if older rows exist,
+                # because those rows can no longer be refreshed.
+                "available": available,
+                "reason": str(entry.get("reason") or ""),
+                "detail": str(entry.get("detail") or ""),
+            }
+        return report
+
+    def source_options(self) -> list[dict[str, Any]]:
+        """Return the source selector options with their recorded event counts.
+
+        Purely additive: the Dashboard treats an empty selection as "all
+        sources", so existing single-source setups render exactly as before.
+        """
+        counts = {
+            str(row[0] or ""): safe_int(row[1])
+            for row in self.conn.execute("SELECT source,COUNT(*) FROM usage_events GROUP BY source")
+        }
+        options: list[dict[str, Any]] = []
+        for key in SOURCE_ORDER:
+            raw_sources = SOURCE_GROUPS.get(key, ())
+            events = sum(counts.get(name, 0) for name in raw_sources)
+            if events <= 0:
+                continue
+            options.append({"value": key, "label": SOURCE_LABELS.get(key, key), "events": events})
+        # Any source that is not part of a known group still needs to be
+        # selectable, otherwise data would become unreachable in the UI.
+        known = {name for names in SOURCE_GROUPS.values() for name in names}
+        for raw, events in sorted(counts.items()):
+            if raw in known or events <= 0:
+                continue
+            options.append({"value": raw, "label": raw, "events": events})
+        return options
 
     @staticmethod
+    def source_clause(source: str | None) -> tuple[str, list[Any]]:
+        """Translate a source selector value into a SQL fragment.
+
+        An empty or unknown value yields an empty clause, so a missing source
+        filter never narrows existing results.
+        """
+        key = str(source or "").strip()
+        if not key:
+            return "", []
+        raw_sources = SOURCE_GROUPS.get(key, (key,))
+        placeholders = ",".join("?" for _ in raw_sources)
+        return f"source IN ({placeholders})", list(raw_sources)
+
+    @classmethod
     def _analytics_where(
+        cls,
         start_ms: int,
         end_ms: int,
         provider_id: str | None = None,
         model_key: tuple[str, str, str] | None = None,
         project_name: str | None = None,
+        source: str | None = None,
     ) -> tuple[str, list[Any]]:
         clauses = ["event_time >= ?", "event_time < ?"]
         params: list[Any] = [int(start_ms), int(end_ms)]
+        source_sql, source_params = cls.source_clause(source)
+        if source_sql:
+            clauses.append(source_sql)
+            params.extend(source_params)
         if provider_id:
             clauses.append("provider_id = ?")
             params.append(provider_id)
@@ -775,16 +1042,17 @@ class Store:
         project_name: str | None = None,
         granularity: str = "day",
         event_limit: int = 1000,
+        source: str | None = None,
     ) -> dict[str, Any]:
-        where, params = self._analytics_where(start_ms, end_ms, provider_id, model_key, project_name)
+        where, params = self._analytics_where(start_ms, end_ms, provider_id, model_key, project_name, source)
         if start_ms <= 0:
             min_row = self.conn.execute(f"SELECT MIN(event_time) FROM usage_events WHERE {where}", params).fetchone()
             if min_row and min_row[0] is not None:
                 start_ms = int(datetime.fromtimestamp(safe_int(min_row[0]) / 1000).astimezone().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-                where, params = self._analytics_where(start_ms, end_ms, provider_id, model_key, project_name)
+                where, params = self._analytics_where(start_ms, end_ms, provider_id, model_key, project_name, source)
             else:
                 start_ms = int(datetime.fromtimestamp(end_ms / 1000).astimezone().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-                where, params = self._analytics_where(start_ms, end_ms, provider_id, model_key, project_name)
+                where, params = self._analytics_where(start_ms, end_ms, provider_id, model_key, project_name, source)
 
         aggregate = """
             COUNT(*) AS requests,
@@ -888,8 +1156,9 @@ class Store:
         provider_id: str | None = None,
         model_key: tuple[str, str, str] | None = None,
         project_name: str | None = None,
+        source: str | None = None,
     ) -> list[dict[str, Any]]:
-        where, params = self._analytics_where(start_ms, end_ms, provider_id, model_key, project_name)
+        where, params = self._analytics_where(start_ms, end_ms, provider_id, model_key, project_name, source)
         return [
             dict(row)
             for row in self.conn.execute(
@@ -955,12 +1224,56 @@ class Monitor:
         self.logger = logger
         self.store = Store(data_dir)
         self.csv_dir = self.store.csv_dir
-        self.source_db = detect_opencode_db(config)
-        self.config["opencode_db"] = str(self.source_db)
+        # Per-source availability, surfaced in the UI so an unreadable or
+        # schema-changed source never looks like "no usage".
+        self.source_health: dict[str, dict[str, Any]] = {}
+        self.source_db: Path | None = None
+        try:
+            self.source_db = detect_opencode_db(config)
+            self.config["opencode_db"] = str(self.source_db)
+        except FileNotFoundError:
+            # WorkBuddy-only setups are valid; OpenCode simply contributes no rows.
+            self.logger.info("OpenCode database not found; continuing with WorkBuddy only")
+            self.source_health["opencode"] = {
+                "available": False,
+                "reason": "not_found",
+                "detail": str(config.get("opencode_db") or "auto-detect failed"),
+            }
+        self.workbuddy_root = detect_workbuddy_root(config)
+        if self.workbuddy_root:
+            self.config["workbuddy_root"] = str(self.workbuddy_root)
+        self.dsh_root = detect_dsh_root(config)
+        if self.dsh_root:
+            self.config["dsh_root"] = str(self.dsh_root)
 
     def _read_source_rows(self, full: bool) -> tuple[list[UsageRecord], dict[str, int]]:
         records: list[UsageRecord] = []
         watermarks: dict[str, int] = {}
+        # Cursors are buffered and flushed inside the sync transaction, so the
+        # read path never commits and never nests a transaction.
+        self._pending_workbuddy_cursors: dict[str, int] = {}
+        watermarks.update(self._read_opencode_rows(records, full))
+        watermarks.update(self._read_workbuddy_rows(records, full))
+        watermarks.update(self._read_dsh_rows(records, full))
+        return records, watermarks
+
+    def _flush_workbuddy_cursors(self) -> None:
+        pending = getattr(self, "_pending_workbuddy_cursors", None)
+        if not pending:
+            return
+        cursors = self._workbuddy_cursors()
+        cursors.update(pending)
+        if len(cursors) > 2000:
+            cursors = dict(list(cursors.items())[-1000:])
+        self.store.set_meta(self._workbuddy_cursor_key(), json.dumps(cursors))
+        self._pending_workbuddy_cursors = {}
+
+    def _read_opencode_rows(
+        self, records: list[UsageRecord], full: bool
+    ) -> dict[str, int]:
+        watermarks: dict[str, int] = {}
+        if self.source_db is None:
+            return watermarks
         overlap_ms = 10 * 60 * 1000
         uri = f"file:{self.source_db.as_posix()}?mode=ro"
         source = sqlite3.connect(uri, uri=True, timeout=5)
@@ -1015,10 +1328,36 @@ class Monitor:
                     if record:
                         records.append(record)
             if "session_message" not in tables and "message" not in tables:
-                raise RuntimeError("OpenCode database has neither session_message nor message table")
+                # A future OpenCode schema change would otherwise look exactly
+                # like "no usage", so the condition is recorded for the UI
+                # instead of only being logged.
+                detail = ", ".join(sorted(tables)[:12]) or "(no tables)"
+                self.source_health["opencode"] = {
+                    "available": False,
+                    "reason": "schema_unrecognized",
+                    "detail": detail,
+                }
+                self.logger.warning(
+                    "OpenCode database has neither session_message nor message table; skipping. Tables: %s",
+                    detail,
+                )
+                return watermarks
+            self.source_health["opencode"] = {
+                "available": True,
+                "reason": "",
+                "detail": "",
+            }
+        except sqlite3.DatabaseError as exc:
+            self.source_health["opencode"] = {
+                "available": False,
+                "reason": "read_error",
+                "detail": f"{type(exc).__name__}: {exc}"[:200],
+            }
+            self.logger.warning("Cannot read OpenCode database %s: %s", self.source_db, exc)
+            return watermarks
         finally:
             source.close()
-        return records, watermarks
+        return watermarks
 
     def _base_fields(self, row: sqlite3.Row, data: dict[str, Any]) -> dict[str, str]:
         project_id = str(row["project_id"] or "global")
@@ -1103,8 +1442,420 @@ class Monitor:
             **tokens,
         )
 
+    def _read_workbuddy_rows(
+        self, records: list[UsageRecord], full: bool
+    ) -> dict[str, int]:
+        """Read WorkBuddy per-session JSONL logs and append UsageRecords.
+
+        WorkBuddy persists one JSON object per model request under
+        ``<workbuddy_root>/projects/<project>/<session>.jsonl``. Each assistant
+        turn carries ``providerData.rawUsage`` with the provider's own token
+        counters, so no credit-to-token conversion is required.
+
+        The logs are append-only, so file size is used as the incremental
+        cursor. Any file that shrinks is treated as rewritten and re-read from
+        the start. Parsing is tolerant: unknown fields are ignored and a
+        malformed line is skipped rather than aborting the sync.
+        """
+        if not self.workbuddy_root:
+            if config_enabled := bool(self.config.get("workbuddy_enabled", True)):
+                self.source_health[WORKBUDDY_SOURCE] = {
+                    "available": False,
+                    "reason": "not_found",
+                    "detail": str(self.config.get("workbuddy_root") or "~/.workbuddy"),
+                }
+            return {}
+        projects_dir = self.workbuddy_root / "projects"
+        if not projects_dir.is_dir():
+            self.source_health[WORKBUDDY_SOURCE] = {
+                "available": False,
+                "reason": "no_projects_dir",
+                "detail": str(projects_dir),
+            }
+            return {}
+        self.source_health[WORKBUDDY_SOURCE] = {
+            "available": True,
+            "reason": "",
+            "detail": "",
+        }
+        watermarks: dict[str, int] = {}
+        pending = getattr(self, "_pending_workbuddy_cursors", None)
+        if pending is None:
+            pending = self._pending_workbuddy_cursors = {}
+        cursors = self._workbuddy_cursors()
+        for path in sorted(projects_dir.rglob("*.jsonl")):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            key = str(path)
+            size = stat.st_size
+            start = 0 if full or size < cursors.get(key, 0) else cursors.get(key, 0)
+            try:
+                with path.open("rb") as handle:
+                    if start:
+                        handle.seek(start)
+                    for line in handle:
+                        if b'"rawUsage"' not in line:
+                            continue
+                        record = self._parse_workbuddy_line(path, line)
+                        if record:
+                            records.append(record)
+                            ts = record.event_time
+                            if ts > watermarks.get("workbuddy", 0):
+                                watermarks["workbuddy"] = ts
+            except OSError as exc:
+                self.logger.warning("Cannot read WorkBuddy log %s: %s", path, exc)
+                continue
+            # Only advance the cursor to a complete line so a partially
+            # written record is picked up on the next pass.
+            pending[key] = self._last_complete_line_end(path)
+        return watermarks
+
+    def _read_dsh_rows(
+        self, records: list[UsageRecord], full: bool
+    ) -> dict[str, int]:
+        """Read DeepSeek Harness session logs.
+
+        Each session is a zstd-compressed JSONL event log. Unlike WorkBuddy the
+        file is rewritten in place, so byte offsets cannot be used as an
+        incremental cursor; instead every file is decompressed and the records
+        are keyed by session id plus event sequence, which makes repeated
+        scans idempotent through the normal upsert path.
+
+        Token data lives on ``assistant/message`` events as per-request
+        ``inputTokens`` / ``outputTokens`` / ``totalTokens``. DeepSeek Harness
+        records no cache counters and no cost, so those stay zero rather than
+        being invented.
+        """
+        if not self.dsh_root:
+            if self.config.get("dsh_enabled", True):
+                self.source_health[DSH_SOURCE] = {
+                    "available": False,
+                    "reason": "not_found",
+                    "detail": str(self.config.get("dsh_root") or "~/.dsh"),
+                }
+            return {}
+        sessions_dir = self.dsh_root / "sessions"
+        if not sessions_dir.is_dir():
+            self.source_health[DSH_SOURCE] = {
+                "available": False,
+                "reason": "no_sessions_dir",
+                "detail": str(sessions_dir),
+            }
+            return {}
+        self.source_health[DSH_SOURCE] = {"available": True, "reason": "", "detail": ""}
+        try:
+            import zstandard  # type: ignore
+        except ImportError:
+            self.source_health[DSH_SOURCE] = {
+                "available": False,
+                "reason": "missing_dependency",
+                "detail": "pip install zstandard",
+            }
+            self.logger.warning("DeepSeek Harness logs need the 'zstandard' package; skipping")
+            return {}
+
+        decompressor = zstandard.ZstdDecompressor()
+        watermarks: dict[str, int] = {}
+        for log_path in sorted(sessions_dir.rglob("session.v*.jsonl.zstd")):
+            try:
+                with log_path.open("rb") as handle:
+                    payload = decompressor.stream_reader(handle).read()
+            except Exception as exc:
+                # A session still being written can surface as a truncated
+                # frame; that is expected and must not abort the whole sync.
+                self.logger.debug("Cannot read DeepSeek Harness log %s: %s", log_path, exc)
+                continue
+            try:
+                events = [
+                    json.loads(line)
+                    for line in payload.decode("utf-8", "replace").splitlines()
+                    if line.strip()
+                ]
+            except Exception as exc:
+                self.logger.warning("Malformed DeepSeek Harness log %s: %s", log_path, exc)
+                continue
+            context = self._dsh_session_context(events, log_path)
+            for event in events:
+                record = self._parse_dsh_event(event, context)
+                if not record:
+                    continue
+                records.append(record)
+                if record.event_time > watermarks.get(DSH_SOURCE, 0):
+                    watermarks[DSH_SOURCE] = record.event_time
+        return watermarks
+
+    def _dsh_session_context(self, events: list[dict[str, Any]], log_path: Path) -> dict[str, Any]:
+        """Pull session-level facts (id, cwd) and the per-request model route."""
+        context: dict[str, Any] = {
+            "session_id": "",
+            "cwd": "",
+            "provider": "",
+            "model": "",
+            "variant": "default",
+        }
+        fallback = log_path.parent.name
+        if fallback.startswith("session-"):
+            fallback = fallback[len("session-"):]
+        context["session_id"] = fallback
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == "session":
+                context["session_id"] = str(event.get("id") or context["session_id"])
+                context["cwd"] = str(event.get("cwd") or "")
+                context["agent_preset"] = str(event.get("agentPreset") or "")
+            elif event.get("type") == "request/context":
+                data = event.get("data") or {}
+                context["provider"] = str(data.get("provider") or "")
+                context["model"] = str(data.get("model") or "")
+        return context
+
+    def _parse_dsh_event(self, event: dict[str, Any], context: dict[str, Any]) -> UsageRecord | None:
+        if not isinstance(event, dict) or event.get("type") != "assistant/message":
+            return None
+        data = event.get("data") or {}
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        input_tokens = safe_int(usage.get("inputTokens"))
+        output_tokens = safe_int(usage.get("outputTokens"))
+        total_tokens = safe_int(usage.get("totalTokens"))
+        if not (input_tokens or output_tokens or total_tokens):
+            return None
+        event_time = safe_int(event.get("time"))
+        if event_time <= 0:
+            return None
+        message = data.get("message") or {}
+        seq = event.get("seq")
+        message_id = str(message.get("id") or "")
+        record_key = message_id or f"seq-{seq}"
+        session_id = str(context.get("session_id") or "")
+        # Per-request key. The event sequence makes it unique even when the
+        # provider omits a message id, and the prefix keeps it clear of the
+        # other sources' namespaces.
+        dedupe_id = f"dsh:{session_id}:{record_key}:{seq}"
+
+        provider, model, variant = self._dsh_route(event, context)
+        cwd = str(context.get("cwd") or "")
+        project_name = Path(cwd).name if cwd else "deepseek-harness"
+        return UsageRecord(
+            message_id=dedupe_id,
+            source=DSH_SOURCE,
+            source_rank=DSH_SOURCE_RANK,
+            session_id=session_id,
+            project_id=session_id or "deepseek-harness",
+            project_name=project_name,
+            project_path=cwd,
+            provider_id=provider,
+            model_id=model,
+            variant=variant,
+            agent=str(context.get("agent_preset") or "dsh"),
+            event_time=event_time,
+            source_created=event_time,
+            source_updated=event_time,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            # DeepSeek Harness does not separate thinking tokens from the
+            # completion total, and reports no cache counters.
+            reasoning_tokens=0,
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+            cost=0.0,
+        )
+
+    def _dsh_route(
+        self, event: dict[str, Any], context: dict[str, Any]
+    ) -> tuple[str, str, str]:
+        """Resolve provider/model for one request.
+
+        The stream trailer carries the authoritative route for the request that
+        produced the usage block, so it is preferred over the session-level
+        request/context event, which can lag behind a mid-session switch.
+        """
+        provider = str(context.get("provider") or "")
+        model = str(context.get("model") or "")
+        variant = str(context.get("variant") or "default")
+        data = event.get("data") or {}
+        for item in data.get("stream") or []:
+            if not isinstance(item, dict) or item.get("type") != "chunk":
+                continue
+            chunk = item.get("chunk")
+            if not isinstance(chunk, dict) or chunk.get("type") != "finish":
+                continue
+            state = chunk.get("replayState") or {}
+            response = state.get("response") or {}
+            provider = str(response.get("provider") or provider)
+            model = str(response.get("model") or model)
+            break
+        if not provider:
+            provider = DSH_PROVIDER_ID
+        if not model:
+            model = "unknown"
+        return provider, model, variant
+
+    def _workbuddy_cursor_key(self) -> str:
+        return "workbuddy_scan_offsets"
+
+    def _workbuddy_cursors(self) -> dict[str, int]:
+        try:
+            raw = json.loads(self.store.get_meta(self._workbuddy_cursor_key(), "{}"))
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        return {str(k): safe_int(v) for k, v in raw.items()}
+
+    def _queue_workbuddy_cursor(self, key: str, offset: int) -> None:
+        pending = getattr(self, "_pending_workbuddy_cursors", None)
+        if pending is None:
+            pending = self._pending_workbuddy_cursors = {}
+        pending[key] = offset
+
+    @staticmethod
+    def _last_complete_line_end(path: Path) -> int:
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as handle:
+                handle.seek(max(0, size - 65536))
+                tail = handle.read()
+        except OSError:
+            return 0
+        index = tail.rfind(b"\n")
+        if index == -1:
+            return max(0, size - len(tail))
+        return size - len(tail) + index + 1
+
+    def _parse_workbuddy_line(self, path: Path, line: bytes) -> UsageRecord | None:
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(obj, dict):
+            return None
+        provider_data = obj.get("providerData")
+        if not isinstance(provider_data, dict):
+            return None
+        raw_usage = provider_data.get("rawUsage")
+        if not isinstance(raw_usage, dict):
+            return None
+        usage = provider_data.get("usage")
+        if not isinstance(usage, dict):
+            usage = {}
+
+        prompt_tokens = safe_int(raw_usage.get("prompt_tokens"))
+        completion_tokens = safe_int(raw_usage.get("completion_tokens"))
+        total_tokens = safe_int(raw_usage.get("total_tokens"))
+        cache_read = safe_int(raw_usage.get("prompt_cache_hit_tokens"))
+        if not cache_read:
+            details = raw_usage.get("prompt_tokens_details")
+            if isinstance(details, dict):
+                cache_read = safe_int(details.get("cached_tokens"))
+        if not cache_read:
+            cache_read = safe_int(raw_usage.get("cache_read_input_tokens"))
+        cache_miss = safe_int(raw_usage.get("prompt_cache_miss_tokens"))
+        if not cache_miss and prompt_tokens:
+            cache_miss = max(0, prompt_tokens - cache_read)
+        # prompt_tokens is inclusive of cache reads, so the non-cached input is
+        # the miss count. This keeps total_with_cache equal to the provider's
+        # reported total instead of double counting the cached prefix.
+        if prompt_tokens and cache_read:
+            input_tokens = cache_miss or (prompt_tokens - cache_read)
+        else:
+            input_tokens = prompt_tokens
+        reasoning = safe_int(raw_usage.get("completion_thinking_tokens"))
+        if not reasoning:
+            completion_details = raw_usage.get("completion_tokens_details")
+            if isinstance(completion_details, dict):
+                reasoning = safe_int(completion_details.get("reasoning_tokens"))
+        if reasoning < 0:
+            reasoning = 0
+        # WorkBuddy reports thinking tokens as a subset of completion_tokens,
+        # while the local schema adds output and reasoning together. Split the
+        # completion total so the two stay disjoint and nothing is counted
+        # twice, and so the reported total still matches the provider's own.
+        if reasoning > completion_tokens:
+            reasoning = completion_tokens
+        output_tokens = completion_tokens - reasoning
+        cache_write = safe_int(raw_usage.get("prompt_cache_write_tokens")) or safe_int(
+            raw_usage.get("cache_creation_input_tokens")
+        )
+        if not cache_write:
+            cache_write = safe_int(raw_usage.get("claude_cache_creation_5_m_tokens")) + safe_int(
+                raw_usage.get("claude_cache_creation_1_h_tokens")
+            )
+        if not any((input_tokens, output_tokens, reasoning, cache_read, cache_write)):
+            return None
+
+        event_time = safe_int(obj.get("timestamp"))
+        if event_time <= 0:
+            return None
+        raw_model_id = str(provider_data.get("requestModelId") or provider_data.get("model") or "unknown")
+        display_name = str(provider_data.get("requestModelName") or raw_model_id).strip()
+        is_custom = raw_model_id.startswith(WORKBUDDY_CUSTOM_PREFIX)
+        # Keep the provider's real model id for pricing lookups, and show the
+        # human-readable name alongside it only when the two differ.
+        model_id = raw_model_id
+        if is_custom:
+            model_id = raw_model_id[len(WORKBUDDY_CUSTOM_PREFIX):] or raw_model_id
+        if display_name and display_name != model_id:
+            model_id = f"{display_name} ({model_id})"
+        variant = "custom" if is_custom else "default"
+        project_path = str(obj.get("cwd") or "")
+        project_id = str(obj.get("sessionId") or "")
+        project_name = Path(project_path).name if project_path else "workbuddy"
+        # A stable per-request key. WorkBuddy reuses messageId across the
+        # streaming items of one assistant turn, so the record id is used and
+        # the session id is mixed in to keep it globally unique.
+        record_id = str(obj.get("id") or provider_data.get("messageId") or "")
+        if not record_id:
+            return None
+        message_id = f"workbuddy:{obj.get('sessionId') or ''}:{record_id}"
+        return UsageRecord(
+            message_id=message_id,
+            source=WORKBUDDY_SOURCE,
+            source_rank=WORKBUDDY_SOURCE_RANK,
+            session_id=str(obj.get("sessionId") or ""),
+            project_id=project_id,
+            project_name=project_name,
+            project_path=project_path,
+            provider_id=WORKBUDDY_PROVIDER_ID,
+            model_id=model_id,
+            variant=variant,
+            agent=str(provider_data.get("agent") or ""),
+            event_time=event_time,
+            source_created=event_time,
+            source_updated=event_time,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            reasoning_tokens=reasoning,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
+            cost=safe_float(raw_usage.get("credit")),
+        )
+
     def _initial_import_done(self) -> bool:
         return self.store.get_meta("initialized") == "1"
+
+    def _alert_scope_label(self, start_ms: int, end_ms: int) -> str:
+        """Describe which recorded sources produced a spike or threshold hit.
+
+        The alert totals intentionally aggregate every source, so the wording
+        must not claim a single product. When only one source contributed the
+        figure is named; otherwise the message stays neutral.
+        """
+        try:
+            sources = self.store.sources_in_range(start_ms, end_ms)
+        except Exception:
+            return "AI 用量"
+        if not sources:
+            return "AI 用量"
+        labels = [SOURCE_LABELS.get(name, name) for name in sources]
+        unique = list(dict.fromkeys(labels))
+        if len(unique) == 1:
+            return f"{unique[0]} 用量"
+        return "AI 用量"
 
     def _evaluate_alerts(self) -> list[dict[str, Any]]:
         if not self._initial_import_done():
@@ -1119,7 +1870,8 @@ class Monitor:
         previous = safe_int(self.store.get_meta(state_key, "0"))
         alerts: list[dict[str, Any]] = []
         if highest_daily > previous and highest_daily > 0:
-            message = f"今日 OpenCode Token 已达到 {format_int(highest_daily)}（含缓存读取）。"
+            scope = self._alert_scope_label(start, end)
+            message = f"今日 {scope} Token 已达到 {format_int(highest_daily)}（含缓存读取）。"
             self.store.set_meta(state_key, str(highest_daily))
             alerts.append({"kind": "daily", "key": state_key, "amount": daily_value, "threshold": highest_daily, "message": message})
 
@@ -1130,7 +1882,8 @@ class Monitor:
         spike_value = safe_int(spike["total_with_cache"])
         active = self.store.get_meta("spike_active", "0") == "1"
         if spike_value >= spike_threshold and not active:
-            message = f"最近 {window_minutes} 分钟 OpenCode Token 突增 {format_int(spike_value)}（含缓存读取）。"
+            scope = self._alert_scope_label(spike_start, timestamp + 60 * 1000)
+            message = f"最近 {window_minutes} 分钟 {scope} Token 突增 {format_int(spike_value)}（含缓存读取）。"
             self.store.set_meta("spike_active", "1")
             alerts.append({"kind": "spike", "key": "spike_active", "amount": spike_value, "threshold": spike_threshold, "message": message})
         elif spike_value < spike_threshold * 0.8 and active:
@@ -1167,6 +1920,10 @@ class Monitor:
                     result.records_changed += 1
             for source, watermark in watermarks.items():
                 self.store.set_meta(f"watermark_{source}", str(watermark))
+            # Persist the probe result so the Dashboard can explain an
+            # unreadable source even when this pass produced no rows.
+            self.store.set_meta("source_health", json.dumps(self.source_health, ensure_ascii=False))
+            self._flush_workbuddy_cursors()
             if full:
                 self.store.set_meta("last_full_reconcile", str(now_ms()))
             if not self._initial_import_done():
@@ -1206,6 +1963,7 @@ class Monitor:
         return {
             "timestamp": timestamp,
             "opencode_running": opencode_is_running(),
+            "workbuddy_running": workbuddy_is_running(),
             "day": day,
             "today": self.store.summary(day_start, day_end),
             "seven_days": self.store.summary(week_start, timestamp + 1),
@@ -1541,6 +2299,8 @@ def status_text(status: dict[str, Any], maximum: float) -> str:
     """Return a Windows tray-tooltip title that fits pystray's 128-char limit."""
     today = status["today"]
     running = bool(status.get("opencode_running"))
+    workbuddy = bool(status.get("workbuddy_running"))
+    dsh = bool(status.get("dsh_running"))
     last_sync = (
         datetime.fromtimestamp(status["last_sync"] / 1000).astimezone().isoformat(timespec="seconds")
         if status["last_sync"]
@@ -1549,7 +2309,9 @@ def status_text(status: dict[str, Any], maximum: float) -> str:
     title = "\n".join(
         (
             f"{APP_NAME} {VERSION}",
-            f"OpenCode: {'running' if running else 'stopped'}",
+            f"OpenCode: {'running' if running else 'stopped'}"
+            f" | WorkBuddy: {'running' if workbuddy else 'stopped'}"
+            f" | DSH: {'running' if dsh else 'stopped'}",
             f"Today: {format_int(today['total_with_cache'])} tokens",
             f"Cache read: {format_int(today['cache_read_tokens'])}",
             f"Synced: {last_sync}",
@@ -1665,9 +2427,9 @@ def run_tray(config_path: Path) -> int:
 
     def sync_once(initial: bool = False) -> None:
         # This guard is intentionally repeated here (the worker also checks),
-        # so a manual refresh can never query the source database while
-        # OpenCode is closed.
-        if not opencode_is_running():
+        # so a manual refresh can never query a source database while every
+        # monitored application is closed.
+        if not any_source_running():
             set_idle_state()
             return
         if not sync_lock.acquire(blocking=False):
@@ -1706,10 +2468,13 @@ def run_tray(config_path: Path) -> int:
         initial = True
         next_sync_at = 0.0
         interval = max(30, safe_int(config["sample_interval_seconds"]))
-        logger.info("Tray worker started (OpenCode running=%s)", opencode_is_running())
+        logger.info(
+            "Tray worker started (OpenCode running=%s, WorkBuddy running=%s)",
+            opencode_is_running(),
+            workbuddy_is_running(),
+        )
         while not stop_event.is_set():
-            running = opencode_is_running()
-            if not running:
+            if not any_source_running():
                 set_idle_state()
                 next_sync_at = 0.0
                 stop_event.wait(PROCESS_POLL_SECONDS)
@@ -1717,7 +2482,7 @@ def run_tray(config_path: Path) -> int:
 
             now = time.monotonic()
             if next_sync_at <= 0 or now >= next_sync_at:
-                logger.info("OpenCode detected; syncing local database")
+                logger.info("A monitored app was detected; syncing local data")
                 sync_once(initial)
                 initial = False
                 next_sync_at = time.monotonic() + interval
@@ -1728,14 +2493,14 @@ def run_tray(config_path: Path) -> int:
                 wait_seconds = min(wait_seconds, max(0.1, next_sync_at - time.monotonic()))
             stop_event.wait(wait_seconds)
 
-    initially_running = opencode_is_running()
+    initially_running = any_source_running()
     initial_icon = make_icon(0, maximum) if initially_running else make_idle_icon()
     tray_state["idle"] = not initially_running
     icon = pystray.Icon(APP_ID, initial_icon, APP_NAME, menu=pystray.Menu())
     notifier.icon = icon
 
     def refresh(_icon: Any = None, _item: Any = None) -> None:
-        if not opencode_is_running():
+        if not any_source_running():
             set_idle_state(force=True)
             return
         threading.Thread(target=sync_once, daemon=True).start()
@@ -1743,8 +2508,11 @@ def run_tray(config_path: Path) -> int:
     def show_status(_icon: Any = None, _item: Any = None) -> None:
         status = read_status_in_current_thread()
         today = status["today"]
-        state = "运行中，监控已启用" if status["opencode_running"] else "未运行，监控处于空闲状态"
-        print(f"OpenCode: {state}")
+        state = "运行中，监控已启用" if any_source_running() else "未运行，监控处于空闲状态"
+        print(f"OpenCode: {'运行中' if status['opencode_running'] else '未运行'}")
+        print(f"WorkBuddy: {'运行中' if status.get('workbuddy_running') else '未运行'}")
+        print(f"DeepSeek Harness: {'运行中' if status.get('dsh_running') else '未运行'}")
+        print(f"Monitor: {state}")
         print(f"Today: {format_int(today['total_with_cache'])} (cache included)")
         print(f"No cache read: {format_int(today['total_without_cache_read'])}")
         print(f"Open data: {data_dir}")
@@ -2160,6 +2928,7 @@ class DashboardApi:
         view: str = "overview",
         custom_start: str = "",
         custom_end: str = "",
+        source: str = "",
     ) -> dict[str, Any]:
         config = load_config(Path(self._config_path))
         data_dir = app_data_dir()
@@ -2180,6 +2949,7 @@ class DashboardApi:
                 model_key=model_key,
                 granularity=granularity,
                 event_limit=event_limit,
+                source=source or None,
             )
             pricing_enabled = bool(config.get("use_model_dev_pricing", True))
             selected_pricing_mode = pricing_mode(config)
@@ -2190,7 +2960,7 @@ class DashboardApi:
                 pricing_catalog, pricing_status = catalog.load()
             elif selected_pricing_mode == "custom":
                 pricing_status = {"source": "custom", "state": "enabled", "updated_at": now_ms()}
-            costing_rows = store.costing_rows(start_ms, end_ms, provider or None, model_key)
+            costing_rows = store.costing_rows(start_ms, end_ms, provider or None, model_key, source=source or None)
             attach_model_dev_costs(analytics, costing_rows, pricing_catalog, config)
             pricing_status["enabled"] = pricing_enabled or selected_pricing_mode == "custom"
             pricing_status["mode"] = selected_pricing_mode
@@ -2215,8 +2985,9 @@ class DashboardApi:
                     model_key=model_key,
                     granularity=previous_granularity,
                     event_limit=0,
+                    source=source or None,
                 )
-                previous_rows = store.costing_rows(previous_start, previous_end, provider or None, model_key)
+                previous_rows = store.costing_rows(previous_start, previous_end, provider or None, model_key, source=source or None)
                 attach_model_dev_costs(previous, previous_rows, pricing_catalog, config)
                 comparison = {}
                 for key in ("requests", "total_with_cache", "total_cost", "cache_read_tokens"):
@@ -2248,11 +3019,18 @@ class DashboardApi:
                         }
                     )
             last_sync = safe_int(store.get_meta("last_sync", "0"))
+            try:
+                probe_health = json.loads(store.get_meta("source_health", "{}"))
+            except json.JSONDecodeError:
+                probe_health = {}
+            if not isinstance(probe_health, dict):
+                probe_health = {}
             return {
                 "version": VERSION,
                 "theme": "light" if str(config.get("ui_theme", "dark")) == "light" else "dark",
                 "period": period,
                 "view": view,
+                "source": source,
                 "options": options,
                 "summary": analytics["summary"],
                 "trend": analytics["trend"],
@@ -2265,6 +3043,11 @@ class DashboardApi:
                 "comparison": comparison,
                 "runtime": {
                     "opencode_running": opencode_is_running(),
+                    "workbuddy_running": workbuddy_is_running(),
+                    "workbuddy_root": str(config.get("workbuddy_root", "")),
+                    "dsh_running": dsh_is_running(),
+                    "dsh_root": str(config.get("dsh_root", "")),
+                    "source_health": store.source_health_report(probe_health),
                     "last_sync": last_sync,
                     "last_sync_text": datetime.fromtimestamp(last_sync / 1000).astimezone().strftime("%Y-%m-%d %H:%M:%S") if last_sync else "尚未同步",
                     "last_error": store.get_meta("last_error", ""),
@@ -2282,8 +3065,55 @@ class DashboardApi:
         finally:
             store.close()
 
+    def sync_if_stale(self, max_age_seconds: float | None = None) -> dict[str, Any]:
+        """Sync only when the local index has gone stale.
+
+        Additive helper so an already-open Dashboard keeps itself current even
+        when the tray worker is not running. It never widens the existing
+        "only read sources while an app is running" rule, and it is a no-op
+        when the last successful sync is still fresh.
+
+        ``max_age_seconds`` defaults to a short Dashboard-facing interval
+        rather than the tray's ``sample_interval_seconds``. Otherwise an open
+        window would poll every few seconds yet still only see data every few
+        minutes, because the tray's longer interval owned the staleness check.
+        """
+        opencode_running = opencode_is_running()
+        workbuddy_running = workbuddy_is_running()
+        dsh_running = dsh_is_running()
+        if not (opencode_running or workbuddy_running or dsh_running):
+            return {"ok": True, "synced": False, "reason": "idle", "last_sync": 0}
+        config = load_config(Path(self._config_path))
+        if max_age_seconds is None:
+            max_age_seconds = DASHBOARD_SYNC_MAX_AGE_SECONDS
+        max_age_ms = max(5, int(float(max_age_seconds) * 1000))
+        data_dir = app_data_dir()
+        store = Store(data_dir)
+        try:
+            last_sync = safe_int(store.get_meta("last_sync", "0"))
+        finally:
+            store.close()
+        if last_sync and now_ms() - last_sync < max_age_ms:
+            return {"ok": True, "synced": False, "reason": "fresh", "last_sync": last_sync}
+        logger = setup_logging(data_dir)
+        monitor = Monitor(config, data_dir, logger)
+        try:
+            monitor.sync()
+            save_config(Path(self._config_path), config)
+        finally:
+            monitor.close()
+        return {
+            "ok": True,
+            "synced": True,
+            "reason": "stale",
+            "last_sync": now_ms(),
+            "opencode_running": opencode_running,
+            "workbuddy_running": workbuddy_running,
+            "dsh_running": dsh_running,
+        }
+
     def refresh(self) -> dict[str, Any]:
-        if opencode_is_running():
+        if any_source_running():
             config = load_config(Path(self._config_path))
             data_dir = app_data_dir()
             logger = setup_logging(data_dir)
@@ -2293,7 +3123,12 @@ class DashboardApi:
                 save_config(Path(self._config_path), config)
             finally:
                 monitor.close()
-        return {"ok": True, "opencode_running": opencode_is_running()}
+        return {
+            "ok": True,
+            "opencode_running": opencode_is_running(),
+            "workbuddy_running": workbuddy_is_running(),
+            "dsh_running": dsh_is_running(),
+        }
 
     def set_theme(self, theme: str) -> dict[str, str]:
         config = load_config(Path(self._config_path))
@@ -2423,6 +3258,29 @@ class DashboardApi:
         return {"ok": True}
 
 
+def _fit_window_to_screen(width: int, height: int) -> tuple[int, int]:
+    """Clamp the default window size to the available screen work area.
+
+    The preferred size is chosen for a 1080p display; on a laptop or a scaled
+    desktop the window must still open fully inside the work area instead of
+    hanging off the edge.
+    """
+    if os.name != "nt":
+        return width, height
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+    screen_w = ctypes.windll.user32.GetSystemMetrics(0)
+    screen_h = ctypes.windll.user32.GetSystemMetrics(1)
+    if screen_w <= 0 or screen_h <= 0:
+        return width, height
+    # Leave a small margin so the title bar and taskbar stay reachable.
+    usable_w = max(360, int(screen_w * 0.94))
+    usable_h = max(480, int(screen_h * 0.92))
+    return min(width, usable_w), min(height, usable_h)
+
+
 def run_dashboard(config_path: Path) -> int:
     # A second dashboard command restores the existing window instead of
     # creating another hidden WebView process after close-to-tray is used.
@@ -2436,12 +3294,13 @@ def run_dashboard(config_path: Path) -> int:
     html_path = resource_path("dashboard.html")
     html = html_path.read_text(encoding="utf-8")
     api = DashboardApi(config_path)
+    width, height = _fit_window_to_screen(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
     window = webview.create_window(
         f"{APP_NAME} {VERSION}",
         html=html,
         js_api=api,
-        width=DEFAULT_WINDOW_WIDTH,
-        height=DEFAULT_WINDOW_HEIGHT,
+        width=width,
+        height=height,
         min_size=(360, 480),
         resizable=True,
         background_color="#0a0a0b",
@@ -2521,6 +3380,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     command = args.command or "tray"
+    # Carry an OpenCode-only installation over before any command opens the
+    # database, otherwise the first start after the rename would look empty.
+    migrate_legacy_data()
     if command == "tray":
         return run_tray(args.config)
     if command == "dashboard":

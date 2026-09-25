@@ -14,7 +14,7 @@ binaries = webview_binaries + clr_binaries + loader_binaries + pythonnet_binarie
 hiddenimports = webview_hidden + clr_hidden + loader_hidden + pythonnet_hidden
 
 a = Analysis(
-    ["opencode_token_monitor.py"],
+    ["agent_token_monitor.py"],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -34,7 +34,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="OpenCodeTokenMonitor",
+    name="AgentTokenMonitor",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -16,6 +16,10 @@ env/
 *.manifest
 *.spec.bak
 
+# Agent scratch directories that can appear when a coding agent runs here
+.workbuddy/
+.dsh/
+
 # Local runtime data and user-specific state
 *.db
 *.sqlite

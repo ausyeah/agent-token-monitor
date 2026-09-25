@@ -1,5 +1,41 @@
 # Release Notes
 
+## v4.0.0 — 2026-09-25
+
+### 改名与定位
+
+- 项目由 **OpenCode Token Monitor** 更名为 **Agent Token Monitor**，仓库同步更名为 `ausyeah/agent-token-monitor`
+- 程序显示名、窗口标题、托盘图标、互斥锁名、EXE 产物与安装目录全部更新
+- 数据目录改为 `%LOCALAPPDATA%\\AgentTokenMonitor`；从 v3.x 升级时，历史统计、价格配置与 CSV 会在首次启动时**自动迁移**，并写入标记文件防止重复导入
+- 安装脚本会清理旧的 `OpenCodeTokenMonitor.exe`，避免新旧版本同时运行
+
+### 新增数据源
+
+- **WorkBuddy**：读取 `~/.workbuddy/projects/**/*.jsonl` 中的 `providerData.rawUsage`，直接使用供应商原始 token 计数器，不对 Credit 做任何换算
+  - 输入 Token 取 `prompt_cache_miss_tokens`，避免与缓存命中前缀重复计算
+  - 推理 Token 是输出的子集，拆分为互斥两项，保证总量与供应商一致
+- **DeepSeek Harness**：读取 `~/.dsh/sessions/**/*.zstd` 中的 `assistant/message` 事件
+  - 逐次请求的 `inputTokens` / `outputTokens` 原样入库
+  - 日志被原地重写，因此不使用字节偏移游标，改为按 `会话 id + 事件序号` 幂等入库
+  - 模型与供应商取自每次请求的 `finish.replayState`，而非会滞后的会话级设置
+- 新增 `zstandard` 依赖；缺失时在界面明确提示，不会静默显示为零
+
+### 界面
+
+- 控制栏新增「来源」下拉，可在 OpenCode / WorkBuddy / DeepSeek Harness 间切换；只有一个来源时自动隐藏
+- Token 构成长条右侧新增各分段占比，可直接读出输入、输出、推理与缓存命中的百分比
+- 控制栏与页面标签改为自动换行，窄窗口下不再出现被裁切或隐藏的控件
+- 周期选择条改为换行展示，移除影响观感的横向滚动条
+- 默认窗口调整为 `985 × 975`，并按屏幕工作区自动收缩
+- 新增「源不可用」横幅：数据库结构无法识别、目录缺失或读取失败时明确提示
+
+### 修复
+
+- **Dashboard 打开时数据不更新**：刷新条件原先依赖「本窗口是否触发同步」，导致托盘写入的新数据被忽略；改为跟踪数据库写入时间戳，并增加兜底重载
+- **Dashboard 刷新滞后**：不再沿用托盘的 5 分钟同步间隔，可见窗口按 20 秒独立判断
+- **告警文案硬编码产品名**：按实际数据来源显示，混合来源时使用中性表述
+- **来源选中后立刻跳回「全部」**：下拉选项的值与显示文字曾混用，`dsh` 与 `DeepSeek Harness` 无法匹配；现已分离，新增来源无需改动前端
+
 ## v3.0.5 — 2026-09-25
 
 ### 清理与整合

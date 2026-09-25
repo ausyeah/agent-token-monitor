@@ -1,33 +1,62 @@
 <div align="center">
 
-# OpenCode Token Monitor
+# Agent Token Monitor
 
-### 面向 OpenCode Zen 免费计划的本地用量仪表盘
+### 面向多个 AI 编码 Agent 的本地 Token 用量仪表盘
 
-**不拿 API Key，不上传会话，不猜额度。** 只在本机 OpenCode 运行时读取它已经保存的本地数据库，把每一次模型请求变成可追溯的 Token、缓存和成本统计。
+**不拿 API Key，不上传会话，不猜额度。** 只在本机 Agent 运行时读取它们已经保存的本地数据，把每一次模型请求变成可追溯的 Token、缓存和成本统计。
 
-[![Windows](https://img.shields.io/badge/Windows-10%2B-0078D4?logo=windows&logoColor=white)](https://github.com/ausyeah/opencode-usage/releases/latest)
+[![Windows](https://img.shields.io/badge/Windows-10%2B-0078D4?logo=windows&logoColor=white)](https://github.com/ausyeah/agent-token-monitor/releases/latest)
 [![WebView2](https://img.shields.io/badge/WebView2-required-0078D4)](https://learn.microsoft.com/microsoft-edge/webview2/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-9b8b6f.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/ausyeah/opencode-usage?label=Release)](https://github.com/ausyeah/opencode-usage/releases/latest)
+[![Release](https://img.shields.io/github/v/release/ausyeah/agent-token-monitor?label=Release)](https://github.com/ausyeah/agent-token-monitor/releases/latest)
 
 </div>
 
 ---
 
+## 同时统计哪些 Agent
+
+| Agent | 读取位置 | Token 口径 |
+| --- | --- | --- |
+| **OpenCode** | `~/.local/share/opencode/opencode.db` | 供应商事件中的 token 字段 |
+| **WorkBuddy** | `~/.workbuddy/projects/**/*.jsonl` | `providerData.rawUsage` 原始计数器 |
+| **DeepSeek Harness** | `~/.dsh/sessions/**/*.jsonl.zstd` | `assistant/message` 的 `usage` |
+
+Dashboard 顶部的「来源」下拉可在这三者之间切换；只有一个来源时该控件自动隐藏。
+
+> WorkBuddy 用积分（Credit）计费且无法换算成 Token 比例，DeepSeek Harness 不记录缓存命中与成本。本工具只呈现各 Agent 真实记录的字段，不做任何推算。
+
 ## 为什么做这个工具？
 
-OpenCode Zen 免费计划最需要的往往不是“再看一个聊天窗口”，而是回答这些问题：
+用 AI 编码 Agent 最缺的往往不是“再看一个聊天窗口”，而是回答这些问题：
 
 - 今天到底用了多少 **Token**？其中多少是缓存读取？
-- 哪些 **供应商**、哪些 **模型 / 变体**贡献了最多用量？
+- 各个 **Agent**、**模型 / 供应商**分别贡献了多少？
 - 最近 30 分钟是否突然出现用量尖峰？
 - 免费模型的成本显示为 `0`，是否真的等于“没有使用量”？
 - 如果账单缺失，参考价格和实际账单到底差多少？
 
-OpenCode Token Monitor 把 OpenCode 本地数据库中的用量记录整理成一个长期、可搜索、可导出的 Windows 桌面仪表盘，特别适合观察 **OpenCode Zen 免费计划**的 Token 消耗和缓存命中情况。
+Agent Token Monitor 把多个 Agent 的本地用量记录整理成一个长期、可搜索、可导出的 Windows 桌面仪表盘。
 
-> **重要说明**：这是本地用量统计工具，不是 OpenCode 或 Zen 的官方配额面板。它不会读取账号剩余额度，也不会绕过任何服务端限制；它展示的是本机 OpenCode 已记录的请求用量。model.dev 价格仅用于缺失账单时的本地估算。
+> **重要说明**：这是本地用量统计工具，不是任何 Agent 或云平台的官方配额面板。它不会读取账号剩余额度，也不会绕过任何服务端限制；它展示的是本机已记录的请求用量。model.dev 价格仅用于缺失账单时的本地估算。
+
+### 各来源的口径差异
+
+WorkBuddy 用积分（Credit）计费，同一模型下不同任务的 Credit / Token 比值差异极大，但它自己会为每次请求记录**供应商原始的 token 计数器**，因此本工具拿到的是真实 Token 数量而非对 Credit 的猜测。
+
+DeepSeek Harness 的会话日志是 zstd 压缩且会被原地重写，所以不使用字节偏移游标，而是每次解压后按 `会话 id + 事件序号` 幂等入库。
+
+| 项目 | WorkBuddy | DeepSeek Harness |
+| --- | --- | --- |
+| 输入 Token | `prompt_cache_miss_tokens`（不含已缓存前缀） | `inputTokens` |
+| 缓存命中 | `prompt_cache_hit_tokens` | 无此字段，记为 0 |
+| 输出 Token | `completion_tokens - completion_thinking_tokens` | `outputTokens` |
+| 推理 Token | `completion_thinking_tokens`（输出的子集，拆分为互斥两项） | 无独立字段，不拆分 |
+| 成本 | Credit 不折算金额 | 无成本字段 |
+| 供应商 / 模型 | `providerData.requestModelId` | 每次请求的 `finish.replayState.response` 路由，优先于会话级设置 |
+
+> DeepSeek Harness 的会话日志是 zstd 压缩且会被原地重写，因此不使用字节偏移游标，而是每次解压后按 `会话 id + 事件序号` 幂等入库，重复同步不会产生重复记录。缺少 `zstandard` 依赖时会在界面上明确提示，而不是静默显示为零。
 
 ## 功能亮点
 
@@ -102,9 +131,9 @@ OpenCode Token Monitor 把 OpenCode 本地数据库中的用量记录整理成�
 
 ### 下载已打包版本
 
-从 [Releases](https://github.com/ausyeah/opencode-usage/releases/latest) 下载 `OpenCodeTokenMonitor-*-windows-x64.exe`：
+从 [Releases](https://github.com/ausyeah/agent-token-monitor/releases/latest) 下载 `AgentTokenMonitor-*-windows-x64.exe`：
 
-1. 双击 EXE 安装到 `%LOCALAPPDATA%\\Programs\\OpenCodeTokenMonitor`
+1. 双击 EXE 安装到 `%LOCALAPPDATA%\\Programs\\AgentTokenMonitor`
 2. 启动 Dashboard
 3. 托盘模式会在后台同步；也可以使用桌面快捷方式直接打开 Dashboard
 
@@ -115,8 +144,8 @@ OpenCode Token Monitor 把 OpenCode 本地数据库中的用量记录整理成�
 需要 Windows、Python 3.13+ 和 Microsoft Edge WebView2 Runtime：
 
 ```powershell
-git clone https://github.com/ausyeah/opencode-usage.git
-cd opencode-usage
+git clone https://github.com/ausyeah/agent-token-monitor.git
+cd agent-token-monitor
 python -m pip install -r requirements.txt
 .\build.ps1
 ```
@@ -124,7 +153,7 @@ python -m pip install -r requirements.txt
 构建产物：
 
 ```text
-dist\OpenCodeTokenMonitor.exe
+dist\AgentTokenMonitor.exe
 ```
 
 安装并保留已有配置：
@@ -162,17 +191,17 @@ python -m unittest discover -s tests -q
 ### 命令行
 
 ```text
-OpenCodeTokenMonitor.exe dashboard
-OpenCodeTokenMonitor.exe tray
-OpenCodeTokenMonitor.exe status
-OpenCodeTokenMonitor.exe status --json
-OpenCodeTokenMonitor.exe history --days 30
-OpenCodeTokenMonitor.exe sync
-OpenCodeTokenMonitor.exe export
-OpenCodeTokenMonitor.exe paths
-OpenCodeTokenMonitor.exe test-alert
-OpenCodeTokenMonitor.exe install
-OpenCodeTokenMonitor.exe uninstall
+AgentTokenMonitor.exe dashboard
+AgentTokenMonitor.exe tray
+AgentTokenMonitor.exe status
+AgentTokenMonitor.exe status --json
+AgentTokenMonitor.exe history --days 30
+AgentTokenMonitor.exe sync
+AgentTokenMonitor.exe export
+AgentTokenMonitor.exe paths
+AgentTokenMonitor.exe test-alert
+AgentTokenMonitor.exe install
+AgentTokenMonitor.exe uninstall
 ```
 
 不传参数或传入 `tray` 时启动托盘模式。
@@ -182,8 +211,10 @@ OpenCodeTokenMonitor.exe uninstall
 默认数据目录：
 
 ```text
-%LOCALAPPDATA%\\OpenCodeTokenMonitor
+%LOCALAPPDATA%\\AgentTokenMonitor
 ```
+
+从 v3.x（`%LOCALAPPDATA%\\OpenCodeTokenMonitor`）升级时，历史统计、价格配置与 CSV 会在首次启动时自动迁移，无需手动操作。
 
 主要文件：
 
@@ -205,9 +236,28 @@ OpenCodeTokenMonitor.exe uninstall
 
 ```text
 %USERPROFILE%\\.local\\share\\opencode\\opencode.db
+%USERPROFILE%\\.workbuddy\\projects\\**\\*.jsonl
+%USERPROFILE%\\.dsh\\sessions\\**\\session.v*.jsonl.zstd
 ```
 
-程序会先检测 `OpenCode.exe`、`opencode.exe` 或 `opencode-cli.exe` 是否运行。未运行时不会查询源数据库，也不会调用 OpenCode CLI 去探测数据。
+程序会先检测 `OpenCode.exe`、`opencode.exe`、`opencode-cli.exe`、`WorkBuddy.exe` 或 `DeepSeek Harness.exe` 是否运行。只要没有任何一个在运行，就不会查询任何源数据，也不会调用 CLI 去探测路径。
+
+配置项：
+
+| 键 | 默认值 | 说明 |
+| --- | --- | --- |
+| `workbuddy_enabled` | `true` | 是否读取 WorkBuddy 本地数据 |
+| `workbuddy_root` | 自动探测 | WorkBuddy 数据目录，留空则自动查找 `~/.workbuddy` |
+| `dsh_enabled` | `true` | 是否读取 DeepSeek Harness 本地数据 |
+| `dsh_root` | 自动探测 | DeepSeek Harness 数据目录，留空则自动查找 `~/.dsh` |
+
+WorkBuddy 的 JSONL 为追加写入，本工具按文件大小维护增量游标，只读取新增部分；文件被截断或改写时会自动从头重读。游标与用量事件在同一事务内提交，重复同步不会产生重复记录。
+
+### Dashboard 自动更新
+
+Dashboard 打开期间每 20 秒检查一次本地索引是否过期，过期才触发一次同步并重绘。后台同步失败不会打断当前视图，下一次会自动重试；`Ctrl+R` 与刷新按钮仍然可用。页面重新获得焦点或从后台切回时也会立即检查一次。
+
+只有一个数据来源时，「来源」下拉会自动隐藏，界面与单来源版本一致。
 
 ## 价格口径
 
@@ -229,13 +279,13 @@ OpenCodeTokenMonitor.exe uninstall
 ## 项目结构
 
 ```text
-opencode_token_monitor.py       后端、SQLite 索引、同步、计价、托盘、CLI、WebView2 启动
+agent_token_monitor.py         后端、SQLite 索引、多 Agent 同步、计价、托盘、CLI、WebView2 启动
 dashboard.html                  响应式 Dashboard、价格窗口、图表和交互
 assets/app.ico                  应用图标
 config.example.json             配置示例
 install.ps1                     Windows 安装脚本
 build.ps1                       PyInstaller 构建入口
-OpenCodeTokenMonitor.spec        单文件 EXE 打包配置
+AgentTokenMonitor.spec          单文件 EXE 打包配置
 tests/test_monitor.py           单元测试
 docs/screenshots/               README 截图
 ```
@@ -245,14 +295,17 @@ docs/screenshots/               README 截图
 提交前建议运行：
 
 ```powershell
-python -m py_compile .\opencode_token_monitor.py
+python -m py_compile .\agent_token_monitor.py
 python -m unittest discover -s tests -q
 ```
 
 当前测试覆盖：
 
 - OpenCode V1 / V2 数据库读取
+- WorkBuddy JSONL 读取、缓存拆分与推理 Token 拆分
+- DeepSeek Harness zstd 会话日志读取与逐请求路由解析
 - 增量同步与去重
+- 来源筛选的增量语义（空值不收窄，`opencode` 覆盖 v1/v2）
 - Token 统计和 CSV
 - model.dev 价格与上下文阶梯
 - 官方、倍率、自定义价格

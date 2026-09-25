@@ -97,17 +97,25 @@
     .primary-button { background: var(--accent-strong); color: var(--accent-ink); border-color: transparent; font-weight: 700; }
     .primary-button:hover { transform: translateY(-1px); filter: brightness(.98); }
     .icon { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+    /* Wrapping instead of horizontal scrolling: controls must never be
+       clipped, at any width, and must not be hidden behind an invisible
+       scroll area. */
     .control-bar {
-      display: flex; align-items: center; gap: 12px; padding: 10px; margin-bottom: 14px; min-width: 0;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 10px; margin-bottom: 14px; min-width: 0;
       background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
-      overflow-x: auto; scrollbar-width: none;
     }
-    .control-bar::-webkit-scrollbar { display: none; }
+    /* The period selector is the primary control and always owns a full row. */
+    .control-bar .segmented { flex: 1 1 100%; width: 100%; }
+    .control-bar .custom-range { flex: 1 1 100%; }
+    /* Filters share leftover space on a wide window and stack when narrow. */
+    .control-bar .filter-field { flex: 1 1 165px; min-width: 0; }
+    .control-bar .filter-field select { width: 100%; min-width: 0; }
     .custom-range { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; color: var(--muted); }
     .custom-range[hidden] { display: none; }
     .custom-range input { height: 36px; color: var(--text-soft); background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 0 8px; color-scheme: dark; }
     html[data-theme="light"] .custom-range input { color-scheme: light; }
-    .segmented { display: inline-flex; align-items: center; gap: 3px; background: var(--surface-2); border-radius: 999px; padding: 4px; flex: 0 0 auto; }
+    .segmented { display: inline-flex; align-items: center; gap: 3px; background: var(--surface-2); border-radius: 999px; padding: 4px; flex: 0 0 auto; scrollbar-width: none; }
+    .segmented::-webkit-scrollbar { display: none; }
     .period-button, .view-tab {
       appearance: none; border: 0; background: transparent; color: var(--muted); cursor: pointer;
       border-radius: 999px; transition: all .18s var(--ease); white-space: nowrap;
@@ -124,14 +132,23 @@
       border: 1px solid var(--border); border-radius: 12px; cursor: pointer;
     }
     select:hover { border-color: color-mix(in srgb, var(--accent) 32%, var(--border)); }
-    #reset-button { margin-left: auto; }
-    .control-quick-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+    #reset-button { flex: 0 0 auto; }
+    /* Additive: source switcher, hidden unless two or more sources exist. */
+    #source-field select { min-width: 132px; }
+    #source-field[hidden] { display: none; }
+    .control-quick-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-left: auto; }
     .quick-button { height: 34px; padding: 0 11px; color: var(--text-soft); background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
     .quick-button:hover { color: var(--text); border-color: var(--accent); }
     .active-filter-summary { display: block; margin: -3px 0 10px; padding: 5px 10px; color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--warning) 22%, var(--border)); border-radius: 999px; font-size: 10px; cursor: pointer; }
     .active-filter-summary[hidden] { display: none; }
-    .view-tabs { display: flex; align-items: center; gap: 7px; margin: 0 0 14px; overflow-x: auto; scrollbar-width: none; }
-    .view-tabs::-webkit-scrollbar { display: none; }
+    /* Additive: surfaces a source that is configured but unreadable, so a
+       schema change never looks like "no usage". */
+    .source-warning { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 10px; padding: 8px 11px; color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, var(--surface)); border: 1px solid color-mix(in srgb, var(--danger) 26%, var(--border)); border-radius: 10px; font-size: 11px; line-height: 1.5; }
+    .source-warning[hidden] { display: none; }
+    .source-warning b { font-weight: 700; }
+    .source-warning code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; color: var(--muted); word-break: break-all; }
+    .view-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0 0 14px; }
+    .view-tabs .view-tab { flex: 0 0 auto; }
     .view-tab { padding: 9px 14px; background: var(--surface); border: 1px solid var(--border); }
     .view-tab.active { color: var(--text); background: var(--surface-3); border-color: color-mix(in srgb, var(--accent) 25%, var(--border)); }
     .view { display: none; }
@@ -157,9 +174,20 @@
     .metric-label { color: var(--muted); font-size: 11px; display: flex; align-items: center; gap: 7px; }
     .metric-mark { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
     .metric-value { margin-top: 8px; font-size: 20px; font-weight: 700; letter-spacing: -.02em; }
-    .cache-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px; margin-top: 18px; }
+    .cache-row { display: grid; grid-template-columns: auto minmax(80px, 1fr) auto minmax(0, auto); align-items: center; gap: 14px; margin-top: 18px; }
     .cache-label, .cache-value { color: var(--muted); font-size: 12px; }
     .cache-value { color: var(--success); font-weight: 700; white-space: nowrap; }
+    /* Share readout beside the composition bar: which part of the bar is what.
+       It is allowed to wrap and shrink so the bar itself is never squeezed out. */
+    .token-share { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px 9px; color: var(--muted); font-size: 11px; min-width: 0; }
+    .token-share:empty { display: none; }
+    .token-share .share-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+    .token-share .share-item i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; flex: 0 0 auto; }
+    .token-share .share-item i.input { background: #6f9cf4; }
+    .token-share .share-item i.output { background: #73c69a; }
+    .token-share .share-item i.reasoning { background: #b18be8; }
+    .token-share .share-item i.cache_hit { background: #e1aa68; }
+    .token-share .share-item b { color: var(--text-soft); font-weight: 700; font-variant-numeric: tabular-nums; }
     .cache-stack { display: flex; width: 100%; height: 12px; overflow: hidden; border: 1px solid var(--border); border-radius: 99px; background: var(--surface-3); }
     .cache-segment { display: block; height: 100%; min-width: 0; transition: width .45s var(--ease); }
     .cache-segment.input { background: #6f9cf4; }
@@ -325,13 +353,12 @@
       .top-actions .status-pill { display: none; }
     }
     @media (min-width: 761px) and (max-width: 2200px) {
-      .control-bar { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) auto auto; gap: 10px 12px; overflow: visible; }
-      .control-bar .segmented { grid-column: 1 / -1; width: 100%; justify-content: space-between; flex-wrap: wrap; overflow: visible; }
-      .control-bar .segmented .period-button { flex: 0 0 auto; }
-      .control-bar .control-divider { display: none; }
-      .control-bar .custom-range { grid-column: 1 / -1; }
-      .control-bar .filter-field { min-width: 0; }
-      .control-bar .filter-field select { width: 100%; min-width: 0; }
+      .topbar { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 28px; align-items: start; }
+      .top-actions { width: auto; justify-self: end; }
+      .overview-top { grid-template-columns: 1fr; }
+      .hero-side { grid-template-columns: repeat(4,minmax(0,1fr)); }
+      .hero-stat-note { overflow: hidden; text-overflow: ellipsis; }
+    }
       .topbar { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 28px; align-items: start; }
       .top-actions { width: auto; justify-self: end; }
       #reset-button { margin-left: 0; }
@@ -351,12 +378,22 @@
       body[data-layout="compact"] .top-actions .soft-button { display: none; }
       body[data-layout="compact"] .top-actions #pricing-button { display: inline-flex; padding: 0 11px; }
       body[data-layout="compact"] .top-actions #pricing-button span { display: none; }
-      body[data-layout="compact"] .control-bar { padding: 7px; border-radius: 16px; margin-bottom: 9px; }
-      body[data-layout="compact"] .segmented { width: 100%; max-width: 100%; justify-content: flex-start; overflow-x: auto; }
+      body[data-layout="compact"] .control-bar { padding: 7px; border-radius: 16px; margin-bottom: 9px; gap: 8px; }
+      /* Period pills wrap onto a second row instead of scrolling behind a
+         visible scrollbar, which read as a broken control at narrow widths. */
+      body[data-layout="compact"] .segmented { width: 100%; max-width: 100%; justify-content: flex-start; flex-wrap: wrap; row-gap: 3px; border-radius: 14px; }
       body[data-layout="compact"] .segmented .period-button { flex: 0 0 auto; }
       body[data-layout="compact"] .control-divider, body[data-layout="compact"] .filter-field label, body[data-layout="compact"] #model-field { display: none; }
+      /* The source switcher stays labelled in compact mode: it is the only
+         control that changes which agent is being measured, so dropping its
+         label would leave an unidentifiable bare dropdown. */
+      body[data-layout="compact"] #source-field { display: flex; min-width: 0; }
+      body[data-layout="compact"] #source-field .filter-field-label { display: inline; flex: 0 0 auto; font-size: 10px; }
+      body[data-layout="compact"] #source-field select { min-width: 96px; width: 100%; }
       body[data-layout="compact"] select { min-width: 128px; height: 34px; }
       body[data-layout="compact"] .period-button { min-width: 46px; padding: 7px 10px; }
+      body[data-layout="compact"] .cache-row { grid-template-columns: auto minmax(60px, 1fr) auto; row-gap: 8px; }
+      body[data-layout="compact"] .token-share { grid-column: 1 / -1; justify-content: flex-end; }
       body[data-layout="compact"] .view-tabs { margin-bottom: 9px; gap: 5px; }
       body[data-layout="compact"] .view-tab { padding: 8px 11px; }
       body[data-layout="compact"] .full-overview { display: none; }
@@ -377,7 +414,7 @@
       body[data-layout="compact"] .detail-search { width: min(58vw, 230px); }
       body[data-layout="compact"] .detail-actions { gap: 8px; }
       body[data-layout="compact"] #reset-button { display: none; }
-      body[data-layout="compact"] .control-quick-actions { grid-column: 2 / -1; justify-self: start; }
+      body[data-layout="compact"] .control-quick-actions { margin-left: 0; }
       body[data-layout="compact"] .compact-hero { padding: 12px 16px; }
       body[data-layout="compact"] .compact-number { font-size: 34px; }
       body[data-layout="compact"] .compact-stats { margin-top: 10px; gap: 6px; }
@@ -433,10 +470,12 @@
       <span class="control-divider"></span>
       <div class="filter-field"><label for="provider-filter">供应商</label><select id="provider-filter"><option>全部供应商</option></select></div>
       <div class="filter-field" id="model-field"><label for="model-filter">模型</label><select id="model-filter"><option>全部模型</option></select></div>
+      <div class="filter-field" id="source-field"><label class="filter-field-label" for="source-filter">来源</label><select id="source-filter"><option value="">全部来源</option></select></div>
       <button id="reset-button" class="soft-button">重置筛选</button>
       <div class="control-quick-actions"><button id="pricing-quick-button" class="quick-button" title="打开价格设置">价格</button><button id="currency-quick-button" class="quick-button" title="切换美元/人民币">$</button></div>
     </section>
     <button id="active-filter-summary" class="active-filter-summary" hidden></button>
+    <div id="source-warning" class="source-warning" hidden></div>
 
     <nav class="view-tabs" aria-label="页面">
       <button class="view-tab active" data-view="overview">总览</button>
@@ -467,7 +506,7 @@
               </div>
             </div>
             <div class="metric-grid" id="metric-grid"></div>
-            <div class="cache-row"><span class="cache-label">Token 构成</span><div id="cache-stack" class="cache-stack" role="img" aria-label="Token 构成比例"></div><span id="hit-rate" class="cache-value">命中 0.0%</span></div>
+            <div class="cache-row"><span class="cache-label">Token 构成</span><div id="cache-stack" class="cache-stack" role="img" aria-label="Token 构成比例"></div><span id="hit-rate" class="cache-value">命中 0.0%</span><span id="token-share" class="token-share"></span></div>
              <div id="cache-legend" class="cache-legend"><span><i class="input"></i>输入 <b data-cache-value="input">—</b></span><span><i class="output"></i>输出 <b data-cache-value="output">—</b></span><span><i class="reasoning"></i>推理 <b data-cache-value="reasoning">—</b></span><span><i class="cache_hit"></i>缓存命中 <b data-cache-value="cache_hit">—</b></span></div>
           </article>
 
@@ -501,7 +540,7 @@
           <article class="card compact-hero">
             <div class="compact-top"><div><div class="scope-line"><span class="scope-mark"></span><span id="compact-scope">全部供应商</span></div><div id="compact-total" class="compact-number">—</div><div class="compact-caption">当前周期 Token · 悬停趋势查看详情</div></div><button id="expand-button" class="icon-button" title="扩大窗口"><svg class="icon" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5"/></svg></button></div>
             <div class="compact-stats"><div class="compact-stat"><span>请求次数</span><strong id="compact-requests">—</strong></div><div class="compact-stat"><span>参考成本</span><strong id="compact-cost">—</strong></div><div class="compact-stat"><span>缓存命中</span><strong id="compact-cache">—</strong></div><div class="compact-stat"><span>缓存命中率</span><strong id="compact-hit">—</strong></div></div>
-            <div class="compact-cache-row"><div class="compact-cache-head"><span>Token 构成</span><strong id="compact-cache-hit">命中 0.0%</strong></div><div id="compact-cache-stack" class="cache-stack" role="img" aria-label="紧凑 Token 构成比例"></div><div id="compact-cache-legend" class="cache-legend compact-cache-legend"><span><i class="input"></i>输入 <b data-cache-value="input">—</b></span><span><i class="output"></i>输出 <b data-cache-value="output">—</b></span><span><i class="reasoning"></i>推理 <b data-cache-value="reasoning">—</b></span><span><i class="cache_hit"></i>缓存命中 <b data-cache-value="cache_hit">—</b></span></div></div>
+            <div class="compact-cache-row"><div class="compact-cache-head"><span>Token 构成</span><strong id="compact-cache-hit">命中 0.0%</strong></div><div id="compact-cache-stack" class="cache-stack" role="img" aria-label="紧凑 Token 构成比例"></div><div id="compact-token-share" class="token-share"></div><div id="compact-cache-legend" class="cache-legend compact-cache-legend"><span><i class="input"></i>输入 <b data-cache-value="input">—</b></span><span><i class="output"></i>输出 <b data-cache-value="output">—</b></span><span><i class="reasoning"></i>推理 <b data-cache-value="reasoning">—</b></span><span><i class="cache_hit"></i>缓存命中 <b data-cache-value="cache_hit">—</b></span></div></div>
           </article>
 
            <div class="compact-breakdown-grid"><article class="card compact-list"><div class="section-head"><div><h2 class="section-title">供应商</h2><div class="section-subtitle">Token 使用排行</div></div></div><div id="compact-providers"></div></article><article class="card compact-list"><div class="section-head"><div><h2 class="section-title">模型</h2><div class="section-subtitle">Token 使用排行</div></div></div><div id="compact-models"></div></article></div>
@@ -545,7 +584,7 @@
       "use strict";
       const $ = (selector) => document.querySelector(selector);
       const $$ = (selector) => [...document.querySelectorAll(selector)];
-      const state = { period: "today", provider: "", model: "", view: "overview", metric: "total_with_cache", customStart: "", customEnd: "", search: "", sortKey: "", sortDirection: "desc", currentRows: [], data: null, sequence: 0, redrawAfter: 0, compact: false, pricingSettings: null, pricingDraftRows: [] };
+      const state = { period: "today", provider: "", model: "", view: "overview", metric: "total_with_cache", customStart: "", customEnd: "", search: "", sortKey: "", sortDirection: "desc", currentRows: [], data: null, sequence: 0, redrawAfter: 0, compact: false, pricingSettings: null, pricingDraftRows: [], source: "" };
       const pricingRateFields = ["input", "output", "reasoning", "cache_read", "cache_write"];
       const metricKeys = { "总 Token":"total_with_cache", "请求次数":"requests", "输入 Token":"input_tokens", "输出 Token":"output_tokens", "推理 Token":"reasoning_tokens", "缓存命中":"cache_hit_tokens", "成本":"total_cost" };
       const tableConfig = {
@@ -630,11 +669,52 @@
         const models = ["全部模型", ...(options?.models || []).map(x => x.label)];
         fillSelect($("#provider-filter"), providers, state.provider || "全部供应商");
         fillSelect($("#model-filter"), models, state.model || "全部模型");
-        const active=[]; if(state.provider)active.push(`供应商：${state.provider}`); if(state.model)active.push(`模型：${state.model}`);
+        renderSourceOptions(options);
+        const active=[]; if(state.provider)active.push(`供应商：${state.provider}`); if(state.model)active.push(`模型：${state.model}`); if(state.source)active.push(`来源：${sourceLabel(state.source, options)}`);
         const filterSummary=$("#active-filter-summary"); filterSummary.hidden=!active.length; filterSummary.textContent=active.length?`${active.join(" · ")}  ×`:"";
         filterSummary.style.display=state.compact&&active.length?"block":"none";
       }
+      // Additive source selector. A single-source setup keeps showing the
+      // same "全部来源" default, so existing dashboards are unchanged.
+      // The option value is always the machine key and the text is always the
+      // backend-provided label. Keeping the two separate means a newly added
+      // source can never be dropped by a hardcoded mapping here.
+      function sourceLabel(value, options) {
+        const match = (options?.sources || []).find(x => x.value === value);
+        return match ? match.label : (value || "");
+      }
+      function renderSourceOptions(options) {
+        const sources = options?.sources || [];
+        const select = $("#source-filter"); const field = $("#source-field");
+        if (!select) return;
+        // Hide the control entirely when there is nothing to switch between.
+        field.hidden = sources.length < 2;
+        if (field.hidden && state.source) { state.source = ""; }
+        const keys = sources.map(x => x.value);
+        select.innerHTML = ["全部来源", ...sources.map(x => x.label)]
+          .map((text, index) => `<option value="${esc(index === 0 ? "" : keys[index - 1])}">${esc(text)}</option>`)
+          .join("");
+        // Restore the selection by machine key; unknown keys fall back to all.
+        select.value = state.source && keys.includes(state.source) ? state.source : "";
+        if (!select.value) state.source = "";
+        select.title = sources.length > 1 ? "按 Agent 切换用量来源" : "当前仅一个数据来源";
+      }
       function fillSelect(select, values, selected) { select.innerHTML = values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join(""); select.value = values.includes(selected) ? selected : values[0]; }
+      // Percentages of each coloured segment, so the bar can be read without
+      // hovering. Shares are computed against the same total the bar uses.
+      function renderTokenShare(parts, summary) {
+        const total = Number(summary.total_with_cache || 0);
+        const items = parts.map(([key, label, get]) => {
+          const value = typeof get === "function" ? Number(get(summary) || 0) : Number(summary[get] || 0);
+          const pct = total > 0 ? (value / total * 100) : 0;
+          return `<span class="share-item"><i class="${key}"></i>${label} <b>${pct < 0.05 && pct > 0 ? "<0.1" : pct.toFixed(1)}%</b></span>`;
+        }).join("");
+        const html = total > 0 ? items : "";
+        // Labels come from a fixed internal table, never from user data, so
+        // innerHTML is safe here; setText would escape the markup.
+        const full = $("#token-share"); if (full) full.innerHTML = html;
+        const compact = $("#compact-token-share"); if (compact) compact.innerHTML = html;
+      }
       function renderCurrent() { if (!state.data) return; if (state.view === "overview") renderOverview(state.data); else renderDetail(state.data); }
       function renderTokenStack(selector, summary, parts) {
         const stack = $(selector); if (!stack) return;
@@ -648,7 +728,7 @@
         stack.setAttribute("aria-label", parts.map(part => `${part[1]} ${compactFmt(partValue(part))}`).join("，"));
       }
       function renderOverview(data) {
-        const s = data.summary || {}; const scope = state.model || state.provider || "全部供应商"; const hit = cacheRate(s);
+        const s = data.summary || {}; const scope = state.model || state.provider || (state.source ? sourceLabel(state.source, data.options) : "全部供应商"); const hit = cacheRate(s);
         setText("#scope-label", scope); setText("#compact-scope", scope); setText("#total-token", compactFmt(s.total_with_cache)); setText("#compact-total", compactFmt(s.total_with_cache));
         setText("#total-caption", `总 Token（含缓存命中） · 约 ${compactFmt(s.total_without_cache_read)} 不含缓存`);
         const tokenDelta=$("#token-delta"); tokenDelta.textContent=changeText(data.comparison?.total_with_cache); tokenDelta.className=`comparison-line ${Number(data.comparison?.total_with_cache?.change_percent||0)>0?"up":Number(data.comparison?.total_with_cache?.change_percent||0)<0?"down":""}`;
@@ -662,6 +742,7 @@
         const tokenParts=[["input","输入","input_tokens"],["output","输出","output_tokens"],["reasoning","推理","reasoning_tokens"],["cache_hit","缓存命中",cacheHitTokens]];
         renderTokenStack("#cache-stack", s, tokenParts);
         renderTokenStack("#compact-cache-stack", s, tokenParts);
+        renderTokenShare(tokenParts, s);
         $$('[data-cache-value]').forEach(node=>{const part=tokenParts.find(item=>item[0]===node.dataset.cacheValue);node.textContent=compactFmt(part?(typeof part[2]==="function"?part[2](s):s[part[2]]||0):0);});
         const metrics = [["输入 Token","input_tokens"],["输出 Token","output_tokens"],["推理 Token","reasoning_tokens"],["缓存命中",cacheHitTokens],["不含缓存","total_without_cache_read"]];
         $("#metric-grid").innerHTML = metrics.map(([label,get]) => `<div class="metric"><div class="metric-label"><span class="metric-mark"></span>${label}</div><div class="metric-value">${compactFmt(typeof get==="function"?get(s):s[get])}</div></div>`).join("");
@@ -727,12 +808,17 @@
         if(state.period==="custom"&&(!state.customStart||!state.customEnd||state.customEnd<state.customStart)){toast("请选择有效的开始和结束日期");return;}
         const sequence=++state.sequence; showLoading(true);
         try {
-          const data=await callApi("get_dashboard",state.period,state.provider,state.model,state.view,state.customStart,state.customEnd);
+          const data=await callApi("get_dashboard",state.period,state.provider,state.model,state.view,state.customStart,state.customEnd,state.source);
           if(sequence!==state.sequence)return;
+          // Any successful render re-baselines both timers, whether it came
+          // from a filter change, the refresh button, or the auto tick.
+          lastSeenSync=Number(data.runtime?.last_sync||0);
+          lastRenderedAt=Date.now();
           state.data=data; applyTheme(data.theme); const rt=data.runtime||{}; displayCurrency=rt.display_currency||"USD"; usdCnyRate=Number(rt.usd_cny_rate||7.2); updateCurrencyButton(); renderOptions(data.options); renderCurrent();
           const pill=$("#status-pill");
-          pill.className=`status-pill ${rt.last_error?"error":rt.opencode_running?"running":""}`;
-          pill.innerHTML=`<span class="status-dot"></span><span>${rt.last_error?"监控错误":rt.opencode_running?"监控运行中":"监控空闲"}</span>`;
+          const anyRunning=rt.opencode_running||rt.workbuddy_running;
+          pill.className=`status-pill ${rt.last_error?"error":anyRunning?"running":""}`;
+          pill.innerHTML=`<span class="status-dot"></span><span>${rt.last_error?"监控错误":anyRunning?"监控运行中":"监控空闲"}</span>`;
           const dailyValue=Number(rt.today?.total_with_cache||0), dailyStep=Math.max(1,Number(rt.daily_alert_tokens||1));
           const nextDaily=(Math.floor(dailyValue/dailyStep)+1)*dailyStep;
           const spikeValue=Number(rt.spike?.total_with_cache||0), spikeLimit=Math.max(1,Number(rt.spike_alert_tokens||1));
@@ -740,7 +826,8 @@
           setText("#pulse-daily",`${compactFmt(dailyValue)} / ${compactFmt(nextDaily)}`); $("#pulse-daily-bar").style.width=`${Math.min(100,dailyValue/nextDaily*100)}%`;
           setText("#pulse-spike",`${compactFmt(spikeValue)} / ${compactFmt(spikeLimit)}`); $("#pulse-spike-bar").style.width=`${Math.min(100,spikeValue/spikeLimit*100)}%`;
           setText("#pulse-pricing",`${exactCoverage.toFixed(1)}%`); $("#pulse-pricing-bar").style.width=`${Math.min(100,exactCoverage)}%`;
-          setText("#footer-source",`最后同步：${rt.last_sync_text||"尚未同步"} · ${rt.timezone||"Local"} · ${rt.source_db||""}`);
+          setText("#footer-source",`最后同步：${rt.last_sync_text||"尚未同步"} · ${rt.timezone||"Local"} · ${rt.source_db||""}${rt.workbuddy_root?` · WorkBuddy: ${rt.workbuddy_root}`:""}`);
+          renderSourceWarning(rt);
           const pricingMode=rt.pricing?.mode||"official"; const multiplier=Number(rt.pricing?.multiplier||1); const pricingLabel=pricingMode==="multiplier"?`${pricingModeLabel(pricingMode)} × ${multiplier}`:pricingModeLabel(pricingMode);
           const currencyNote=displayCurrency==="CNY"?` · 1 USD = ${usdCnyRate.toFixed(4)} CNY`:"";
           setText("#footer-threshold",`定价 ${pricingLabel} · 精确价格 ${exactCoverage.toFixed(1)}% · 参考价格 ${Number(data.summary?.reference_pricing_coverage||0).toFixed(1)}%${currencyNote} · 每日阈值 ${compactFmt(rt.daily_alert_tokens)}`);
@@ -754,14 +841,15 @@
         $("#custom-end").addEventListener("change",e=>{state.customEnd=e.target.value;loadView();});
         $("#provider-filter").addEventListener("change",e=>{state.provider=e.target.value==="全部供应商"?"":e.target.value;state.model="";$("#model-filter").value="全部模型";loadView();});
         $("#model-filter").addEventListener("change",e=>{state.model=e.target.value==="全部模型"?"":e.target.value;const option=(state.data?.options?.models||[]).find(x=>x.label===state.model);if(option)state.provider=option.provider;$("#provider-filter").value=state.provider||"全部供应商";loadView();});
-        $("#reset-button").addEventListener("click",()=>{state.provider="";state.model="";$("#provider-filter").value="全部供应商";$("#model-filter").value="全部模型";loadView();});
+        $("#source-filter").addEventListener("change",e=>{state.source=e.target.value||"";state.provider="";state.model="";$("#provider-filter").value="全部供应商";$("#model-filter").value="全部模型";loadView();});
+        $("#reset-button").addEventListener("click",()=>{state.provider="";state.model="";state.source="";$("#provider-filter").value="全部供应商";$("#model-filter").value="全部模型";$("#source-filter").value="";loadView();});
         $("#active-filter-summary").addEventListener("click",()=>{$("#reset-button").click();});
         $("#detail-search").addEventListener("input",e=>{state.search=e.target.value;if(state.data)renderDetail(state.data);});
         $("#drawer-close").addEventListener("click",closeRequestDrawer); $("#drawer-backdrop").addEventListener("click",closeRequestDrawer);
         document.addEventListener("keydown",e=>{if(e.key==="Escape"){if(!$("#pricing-modal").hidden)closePricingSettings();else closeRequestDrawer();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="f"){e.preventDefault();$("#provider-filter").focus();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="r"){e.preventDefault();$("#refresh-button").click();}});
         $("#metric-filter").addEventListener("change",e=>{state.metric=metricKeys[e.target.value];scheduleChart();});
         $("#theme-button").addEventListener("click",async()=>{const next=document.documentElement.dataset.theme==="light"?"dark":"light";applyTheme(next);try{await callApi("set_theme",next);}catch(error){toast(`主题设置失败：${error}`);}});
-        $("#refresh-button").addEventListener("click",async()=>{showLoading(true);try{const result=await callApi("refresh");await loadView();toast(result.opencode_running?"已同步本地数据库":"OpenCode 未运行，仅刷新历史视图");}catch(error){toast(`刷新失败：${error}`);}finally{showLoading(false);}});
+        $("#refresh-button").addEventListener("click",async()=>{showLoading(true);try{const result=await callApi("refresh");await loadView();const running=result.opencode_running||result.workbuddy_running;toast(running?"已同步本地数据":"没有正在运行的 Agent，仅刷新历史视图");}catch(error){toast(`刷新失败：${error}`);}finally{showLoading(false);}});
         $("#export-button").addEventListener("click",async()=>{try{await callApi("export_csv");toast("CSV 已导出");}catch(error){toast(`导出失败：${error}`);}});
         $("#data-button").addEventListener("click",()=>callApi("open_data_dir")); $("#expand-button").addEventListener("click",()=>callApi("maximize_window"));
         const toggleCurrency = async()=>{try{const next=displayCurrency==="CNY"?"USD":"CNY";const result=await callApi("set_display_currency",next,usdCnyRate);displayCurrency=result.display_currency;usdCnyRate=Number(result.usd_cny_rate||usdCnyRate);updateCurrencyButton();$("#currency-quick-button").textContent=displayCurrency==="CNY"?"¥":"$";await loadView();toast(next==="CNY"?`已切换人民币，1 USD = ${usdCnyRate.toFixed(4)} CNY`:"已切换美元");}catch(error){toast(`切换货币失败：${error}`);}};
@@ -774,7 +862,73 @@
         $("#pricing-reset").addEventListener("click",async()=>{try{await callApi("save_pricing_settings",{mode:"official",multiplier:1,display_currency:displayCurrency,usd_cny_rate:usdCnyRate,default_rates:{},models:[]});closePricingSettings();await loadView();toast("已恢复官方价格");}catch(error){toast(`恢复官方价格失败：${error}`);}});
         let resizeFrame=0; window.addEventListener("resize",()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(updateLayout);},{passive:true});
       }
-      async function init(){bind();updateLayout();await loadView();setInterval(()=>{if(!document.hidden)loadView();},60000);}
+      const AUTO_REFRESH_MS = 20000;
+      // Safety net: reload the view periodically even if no sync stamp changed,
+      // so an external edit to the index can never leave a stale window.
+      const FALLBACK_RELOAD_MS = 120000;
+      let autoRefreshBusy = false;
+      // Tracks the database write time last rendered. The tray worker writes
+      // to the same database, so a change can arrive without this window
+      // having triggered the sync itself.
+      let lastSeenSync = 0;
+      let lastRenderedAt = 0;
+      async function autoRefresh() {
+        if (autoRefreshBusy || document.hidden) return;
+        autoRefreshBusy = true;
+        try {
+          // Ask the backend to sync only when its local index is stale, so an
+          // open window updates itself without hammering the source data.
+          const result = await callApi("sync_if_stale");
+          const stamp = Number(result && result.last_sync || 0);
+          // Redraw whenever the database changed, regardless of which process
+          // wrote it. Keying off "did I sync" would miss tray-side updates.
+          const changed = stamp && stamp !== lastSeenSync;
+          const staleView = lastRenderedAt && (Date.now() - lastRenderedAt) > FALLBACK_RELOAD_MS;
+          if (changed || staleView) {
+            // loadView re-baselines lastSeenSync/lastRenderedAt on success.
+            await loadView();
+          }
+        } catch (error) {
+          // A failed background sync must never interrupt the visible view;
+          // the next tick retries and manual refresh stays available.
+        } finally {
+          autoRefreshBusy = false;
+        }
+      }
+      function renderSourceWarning(runtime) {
+        const box = $("#source-warning");
+        if (!box) return;
+        const health = runtime?.source_health || {};
+        const selected = state.source;
+        // Only warn about sources that are actually in play: a source the user
+        // is not looking at should not raise a banner.
+        const relevant = Object.entries(health).filter(([key, value]) => {
+          if (selected) return key === selected || (key === "opencode" && selected === "opencode");
+          return true;
+        });
+        const broken = relevant.filter(([, value]) => value && value.available === false);
+        if (!broken.length) { box.hidden = true; box.innerHTML = ""; return; }
+        const reasons = {
+          not_found: "未找到数据目录或数据库",
+          schema_unrecognized: "数据库结构无法识别（可能版本已变更）",
+          read_error: "读取失败",
+          no_projects_dir: "缺少 projects 目录",
+        };
+        const items = broken.map(([key, value]) => {
+          const label = value.label || key;
+          const why = reasons[value.reason] || value.reason || "不可用";
+          const detail = value.detail ? ` <code>${esc(value.detail)}</code>` : "";
+          return `<div><b>${esc(label)}</b> ${esc(why)}，本次未读取任何用量。${detail}</div>`;
+        });
+        box.innerHTML = items.join("");
+        box.hidden = false;
+      }
+      async function init(){
+        bind(); updateLayout(); await loadView();
+        setInterval(autoRefresh, AUTO_REFRESH_MS);
+        document.addEventListener("visibilitychange",()=>{ if(!document.hidden) autoRefresh(); });
+        window.addEventListener("focus",autoRefresh);
+      }
       window.addEventListener("pywebviewready",init,{once:true}); if(apiReady())init();
     })();
   </script>
