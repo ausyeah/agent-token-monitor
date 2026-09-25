@@ -210,6 +210,23 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(module.DEFAULT_WINDOW_WIDTH, 700)
         self.assertEqual(module.DEFAULT_WINDOW_HEIGHT, 700)
 
+    def test_dashboard_merges_cache_write_into_hit_category(self) -> None:
+        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+        head, _, after = html.partition('<div id="pricing-backdrop"')
+        pricing, _, script = after.partition("<script>")
+        self.assertTrue(pricing, "pricing modal block not found")
+        ui = head + script
+        self.assertNotIn("缓存写入", ui)
+        self.assertNotIn("缓存读取", ui)
+        self.assertNotIn("cache-write", ui)
+        self.assertIn("缓存写入", pricing)
+        self.assertIn("缓存读取", pricing)
+        self.assertGreaterEqual(ui.count('data-cache-value="cache_hit"'), 2)
+        self.assertGreaterEqual(ui.count('["cache_hit_tokens","缓存命中"'), 5)
+        self.assertIn(".cache-segment.cache_hit", ui)
+        self.assertNotIn(".cache-segment.cache_write", ui)
+        self.assertNotIn('["cache_write"', ui)
+
     def test_tray_title_fits_windows_limit(self) -> None:
         status = {
             "opencode_running": True,
