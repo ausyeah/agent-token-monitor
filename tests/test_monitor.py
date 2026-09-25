@@ -206,6 +206,18 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(module.interpolate_color(0, 100_000_000)[:3], (34, 178, 95))
         self.assertEqual(module.interpolate_color(100_000_000, 100_000_000)[:3], (220, 38, 38))
 
+    def test_tray_title_fits_windows_limit(self) -> None:
+        status = {
+            "opencode_running": True,
+            "last_sync": 1_700_000_000_000,
+            "today": {"total_with_cache": 123_113_574, "cache_read_tokens": 111_112_805},
+        }
+        title = module.status_text(status, 100_000_000)
+        self.assertLessEqual(len(title), 127)
+        self.assertIn("OpenCode: running", title)
+        self.assertIn("Today:", title)
+        self.assertNotIn("database is not queried", title)
+
     def test_opencode_process_detection_names(self) -> None:
         self.assertTrue(module.is_opencode_process_name("OpenCode.exe"))
         self.assertTrue(module.is_opencode_process_name("opencode-cli.exe"))

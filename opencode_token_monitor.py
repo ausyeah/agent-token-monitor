@@ -26,7 +26,7 @@ from PIL import Image, ImageDraw
 
 APP_NAME = "OpenCode Token Monitor"
 APP_ID = "OpenCode.TokenMonitor"
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 MUTEX_NAME = "Local\\OpenCodeTokenMonitorSingleton"
 SYNC_MUTEX_NAME = "Local\\OpenCodeTokenMonitorDataWriter"
 PROCESS_POLL_SECONDS = 2.0
@@ -1536,6 +1536,7 @@ def setup_logging(data_dir: Path) -> logging.Logger:
 
 
 def status_text(status: dict[str, Any], maximum: float) -> str:
+    """Return a Windows tray-tooltip title that fits pystray's 128-char limit."""
     today = status["today"]
     running = bool(status.get("opencode_running"))
     last_sync = (
@@ -1543,14 +1544,20 @@ def status_text(status: dict[str, Any], maximum: float) -> str:
         if status["last_sync"]
         else "never"
     )
-    return (
-        f"{APP_NAME} {VERSION}\n"
-        f"OpenCode: {'running' if running else 'not running'}\n"
-        f"Monitoring: {'active' if running else 'idle (database is not queried)'}\n"
-        f"Today: {format_int(today['total_with_cache'])} tokens (cache included)\n"
-        f"No cache read: {format_int(today['total_without_cache_read'])}\n"
-        f"Last sync: {last_sync}"
+    title = "\n".join(
+        (
+            f"{APP_NAME} {VERSION}",
+            f"OpenCode: {'running' if running else 'stopped'}",
+            f"Today: {format_int(today['total_with_cache'])} tokens",
+            f"Cache read: {format_int(today['cache_read_tokens'])}",
+            f"Synced: {last_sync}",
+        )
     )
+    # pystray/Windows rejects a shell tooltip longer than 127 characters
+    # (128 including the terminating NUL). Keep the useful first lines and
+    # make the hard limit explicit so localized or unusually large values
+    # cannot take down the tray worker again.
+    return title[:127]
 
 
 def open_dashboard(config_path: Path) -> None:
