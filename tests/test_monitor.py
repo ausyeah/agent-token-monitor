@@ -206,6 +206,10 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(module.interpolate_color(0, 100_000_000)[:3], (34, 178, 95))
         self.assertEqual(module.interpolate_color(100_000_000, 100_000_000)[:3], (220, 38, 38))
 
+    def test_default_dashboard_window_is_compact_enough(self) -> None:
+        self.assertEqual(module.DEFAULT_WINDOW_WIDTH, 700)
+        self.assertEqual(module.DEFAULT_WINDOW_HEIGHT, 700)
+
     def test_tray_title_fits_windows_limit(self) -> None:
         status = {
             "opencode_running": True,

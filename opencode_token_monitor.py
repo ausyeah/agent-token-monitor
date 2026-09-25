@@ -26,7 +26,9 @@ from PIL import Image, ImageDraw
 
 APP_NAME = "OpenCode Token Monitor"
 APP_ID = "OpenCode.TokenMonitor"
-VERSION = "3.0.1"
+VERSION = "3.0.2"
+DEFAULT_WINDOW_WIDTH = 700
+DEFAULT_WINDOW_HEIGHT = 700
 MUTEX_NAME = "Local\\OpenCodeTokenMonitorSingleton"
 SYNC_MUTEX_NAME = "Local\\OpenCodeTokenMonitorDataWriter"
 PROCESS_POLL_SECONDS = 2.0
@@ -2383,8 +2385,8 @@ def run_dashboard(config_path: Path) -> int:
         f"{APP_NAME} {VERSION}",
         html=html,
         js_api=api,
-        width=1480,
-        height=860,
+        width=DEFAULT_WINDOW_WIDTH,
+        height=DEFAULT_WINDOW_HEIGHT,
         min_size=(360, 480),
         resizable=True,
         background_color="#0a0a0b",
