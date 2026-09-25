@@ -35,6 +35,10 @@ DEFAULT_WINDOW_WIDTH = 985
 DEFAULT_WINDOW_HEIGHT = 975
 MUTEX_NAME = "Local\\AgentTokenMonitorSingleton"
 SYNC_MUTEX_NAME = "Local\\AgentTokenMonitorDataWriter"
+# The Dashboard runs as a process separate from the tray, so it needs its own
+# guard. Without it, repeated launches pile up windows, each with a WebView2
+# host process, and a stale one can survive as a blank frame.
+DASHBOARD_MUTEX_NAME = "Local\\AgentTokenMonitorDashboard"
 PROCESS_POLL_SECONDS = 2.0
 # How stale the local index may get before an open Dashboard triggers a sync.
 # Kept well below the tray interval so a visible window tracks live usage.
@@ -226,6 +230,32 @@ def app_command(*arguments: str) -> list[str]:
 def resource_path(relative: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return base / relative
+
+
+# A Dashboard this small is never legitimately smaller; the threshold only
+# catches a truncated or wrongly packaged asset.
+_MIN_DASHBOARD_BYTES = 5_000
+
+
+def load_dashboard_html() -> str:
+    """Read the packaged Dashboard and fail loudly when it is unusable.
+
+    Handing missing or truncated HTML to the WebView produces a silent black
+    window with no clue what went wrong. Verifying it up front turns that into
+    an actionable message instead.
+    """
+    path = resource_path("dashboard.html")
+    if not path.is_file():
+        raise RuntimeError(f"Dashboard asset is missing: {path}")
+    try:
+        html = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Dashboard asset could not be read: {exc}") from None
+    if len(html) < _MIN_DASHBOARD_BYTES or "<body" not in html:
+        raise RuntimeError(
+            f"Dashboard asset looks corrupt ({len(html)} bytes): {path}"
+        )
+    return html
 
 
 def now_ms() -> int:
@@ -2340,6 +2370,75 @@ def show_existing_dashboard() -> bool:
         return False
 
 
+def close_stale_dashboards(logger: logging.Logger | None = None) -> int:
+    """Close Dashboard windows left behind by an earlier build.
+
+    Window lookup elsewhere matches the exact current title, so a window from
+    a previous version (for example "OpenCode Token Monitor 3.0.5") is never
+    found and survives as a blank frame while a new Dashboard starts beside
+    it. Only windows belonging to this executable are touched.
+    """
+    if os.name != "nt":
+        return 0
+    current = f"{APP_NAME} {VERSION}"
+    try:
+        user32 = ctypes.windll.user32
+        own_pid = os.getpid()
+
+        class EnumCtx(ctypes.Structure):
+            _fields_ = [("handles", ctypes.POINTER(ctypes.c_void_p)), ("count", ctypes.c_int)]
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(
+            ctypes.c_bool, ctypes.c_void_p, ctypes.POINTER(EnumCtx)
+        )
+        buf = ctypes.c_void_p()
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextW.restype = ctypes.c_int
+
+        def callback(hwnd, ctx_ptr):
+            ctx = ctx_ptr.contents
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            title = buffer.value
+            if "Token Monitor" not in title or title == current:
+                return True
+            owner = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            if owner.value == own_pid:
+                return True
+            # Never close a window from a different program that merely
+            # mentions the product name.
+            pid = ctypes.c_ulong(owner.value)
+            process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not process:
+                return True
+            try:
+                size = ctypes.c_ulong(32768)
+                name_buf = ctypes.create_unicode_buffer(size.value)
+                ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                    process, 0, name_buf, ctypes.byref(size)
+                )
+            finally:
+                ctypes.windll.kernel32.CloseHandle(process)
+            if Path(name_buf.value).name.lower() != Path(sys.executable).name.lower():
+                return True
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+            ctx.count += 1
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(callback), ctypes.byref(ctx := EnumCtx()))
+        if ctx.count and logger:
+            logger.info("Closed %d stale Dashboard window(s)", ctx.count)
+        return ctx.count
+    except Exception as exc:  # never block startup on cleanup
+        if logger:
+            logger.debug("Stale dashboard cleanup skipped: %s", exc)
+        return 0
+
+
 def tray_instance_exists() -> bool:
     """Check the tray singleton without taking ownership of its mutex."""
     if os.name != "nt":
@@ -3065,6 +3164,13 @@ class DashboardApi:
         finally:
             store.close()
 
+    def report_ui_error(self, message: str) -> dict[str, Any]:
+        """Record a Dashboard-side failure so a blank screen is diagnosable."""
+        text = str(message or "")[:2000]
+        logger = setup_logging(app_data_dir())
+        logger.error("Dashboard UI error: %s", text)
+        return {"ok": True}
+
     def sync_if_stale(self, max_age_seconds: float | None = None) -> dict[str, Any]:
         """Sync only when the local index has gone stale.
 
@@ -3281,33 +3387,69 @@ def _fit_window_to_screen(width: int, height: int) -> tuple[int, int]:
     return min(width, usable_w), min(height, usable_h)
 
 
+def _report_startup_failure(message: str) -> None:
+    """Surface a startup failure instead of leaving a silent dead process."""
+    logger = setup_logging(app_data_dir())
+    logger.error("Dashboard startup failed: %s", message)
+    if os.name == "nt":
+        try:
+            ctypes.windll.user32.MessageBoxW(None, str(message), APP_NAME, 0x10)
+            return
+        except Exception:
+            pass
+    print(f"{APP_NAME}: {message}", file=sys.stderr)
+
+
 def run_dashboard(config_path: Path) -> int:
+    logger = setup_logging(app_data_dir())
+    # Windows left over by an older build are never matched by the exact-title
+    # lookup below, so remove them first.
+    close_stale_dashboards(logger)
     # A second dashboard command restores the existing window instead of
     # creating another hidden WebView process after close-to-tray is used.
     if show_existing_dashboard():
         return 0
+    # Guard against a race between two launches, and against an orphan process
+    # that still owns a dead WebView but is not reachable by window title.
+    guard = acquire_named_mutex(DASHBOARD_MUTEX_NAME, timeout_ms=0)
+    if guard is None and os.name == "nt":
+        if show_existing_dashboard():
+            return 0
+        logger.info("Another Dashboard instance holds the lock; deferring to it")
+        return 0
     try:
         import webview  # type: ignore
     except ImportError as exc:
+        release_named_mutex(guard)
         raise RuntimeError("pywebview is required to run the desktop dashboard") from exc
 
-    html_path = resource_path("dashboard.html")
-    html = html_path.read_text(encoding="utf-8")
+    try:
+        html = load_dashboard_html()
+    except RuntimeError as exc:
+        release_named_mutex(guard)
+        _report_startup_failure(str(exc))
+        return 1
+
     api = DashboardApi(config_path)
     width, height = _fit_window_to_screen(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
-    window = webview.create_window(
-        f"{APP_NAME} {VERSION}",
-        html=html,
-        js_api=api,
-        width=width,
-        height=height,
-        min_size=(360, 480),
-        resizable=True,
-        background_color="#0a0a0b",
-        text_select=True,
-        zoomable=False,
-        confirm_close=False,
-    )
+    try:
+        window = webview.create_window(
+            f"{APP_NAME} {VERSION}",
+            html=html,
+            js_api=api,
+            width=width,
+            height=height,
+            min_size=(360, 480),
+            resizable=True,
+            background_color="#0a0a0b",
+            text_select=True,
+            zoomable=False,
+            confirm_close=False,
+        )
+    except Exception as exc:
+        release_named_mutex(guard)
+        _report_startup_failure(f"The dashboard window could not be created: {exc}")
+        return 1
     global DASHBOARD_WINDOW
     DASHBOARD_WINDOW = window
 
@@ -3324,7 +3466,13 @@ def run_dashboard(config_path: Path) -> int:
         return False
 
     window.events.closing += hide_to_tray
-    webview.start(debug=False, gui="edgechromium")
+    try:
+        webview.start(debug=False, gui="edgechromium")
+    finally:
+        # The lock is process-wide, so release it even on a crash path. Leaving
+        # it held is harmless once the process exits, but an explicit release
+        # keeps shutdown ordering obvious and testable.
+        release_named_mutex(guard)
     return 0
 
 

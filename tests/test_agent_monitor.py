@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -621,6 +622,71 @@ class MonitorTests(unittest.TestCase):
             finally:
                 check.close()
                 con.close()
+
+    # --- startup resilience --------------------------------------------------
+
+    def test_dashboard_asset_is_verified_before_the_window_opens(self) -> None:
+        """A missing or truncated asset must not become a silent black window."""
+        original = module.resource_path
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                module.resource_path = lambda rel: root / rel
+                with self.assertRaises(RuntimeError):
+                    module.load_dashboard_html()
+                (root / "dashboard.html").write_text("<html><body>tiny</body></html>", encoding="utf-8")
+                with self.assertRaises(RuntimeError):
+                    module.load_dashboard_html()
+                (root / "dashboard.html").write_text(
+                    "<html><body>" + ("x" * 6000) + "</body></html>", encoding="utf-8"
+                )
+                self.assertIn("<body>", module.load_dashboard_html())
+        finally:
+            module.resource_path = original
+
+    def test_dashboard_branding_matches_the_renamed_product(self) -> None:
+        """The rendered title and eyebrow must not keep the old product name."""
+        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("<title>Agent Token Monitor</title>", html)
+        self.assertIn('<div class="eyebrow">Agent Token Monitor</div>', html)
+        self.assertNotIn("OpenCode Token Monitor", html)
+        self.assertNotIn("opencode_token_monitor", html)
+
+    def test_dashboard_has_a_dedicated_single_instance_lock(self) -> None:
+        self.assertTrue(module.DASHBOARD_MUTEX_NAME)
+        self.assertNotEqual(module.DASHBOARD_MUTEX_NAME, module.MUTEX_NAME)
+        self.assertNotEqual(module.DASHBOARD_MUTEX_NAME, module.SYNC_MUTEX_NAME)
+        self.assertIn("AgentTokenMonitor", module.DASHBOARD_MUTEX_NAME)
+
+    def test_dashboard_reports_ui_failures_instead_of_going_blank(self) -> None:
+        """A bridge failure or script error must render a visible message."""
+        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("function showFatal(", html)
+        # The panel is created on demand, so the id is assigned in script.
+        self.assertIn('box.id = "fatal-panel"', html)
+        self.assertIn("fatal-panel", html)
+        self.assertIn("__bridgeWatchdog", html)
+        self.assertIn('window.addEventListener("error"', html)
+        self.assertIn('window.addEventListener("unhandledrejection"', html)
+        self.assertIn("report_ui_error", html)
+        # init must be re-entrancy safe: pywebviewready and the immediate check
+        # can both fire, which used to bind every handler twice.
+        self.assertIn("if (initialised) return;", html)
+        self.assertIn("clearTimeout(window.__bridgeWatchdog);", html)
+        self.assertTrue(hasattr(module.DashboardApi, "report_ui_error"))
+
+    def test_stale_dashboard_cleanup_only_touches_this_program(self) -> None:
+        """Cleanup must never close an unrelated window with a similar title."""
+        if os.name != "nt":
+            self.skipTest("Windows only")
+        source = (Path(module.__file__).parent / "agent_token_monitor.py").read_text(encoding="utf-8")
+        self.assertIn("def close_stale_dashboards(", source)
+        self.assertIn("WM_CLOSE", source)
+        # The executable name has to be compared before anything is closed.
+        self.assertIn("QueryFullProcessImageNameW", source)
+        self.assertIn("Path(name_buf.value).name.lower()", source)
+        # A non-Windows platform must not attempt the enumeration.
+        self.assertEqual(module.close_stale_dashboards(None), 0)
 
     # --- dashboard behaviour -------------------------------------------------
 
