@@ -5,6 +5,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 import agent_token_monitor as module
@@ -83,9 +84,11 @@ class MonitorTests(unittest.TestCase):
             config = dict(module.DEFAULT_CONFIG)
             config["opencode_db"] = str(source)
             # Keep this test hermetic: auto-detection would otherwise read the
-            # real ~/.workbuddy or ~/.dsh directory of whoever runs the suite.
+            # real ~/.workbuddy, ~/.dsh or ~/.codex directory of whoever runs
+            # the suite.
             config["workbuddy_enabled"] = False
             config["dsh_enabled"] = False
+            config["codex_enabled"] = False
             logger = module.logging.getLogger("test-monitor")
             monitor = module.Monitor(config, data, logger)
             first = monitor.sync()
@@ -102,7 +105,12 @@ class MonitorTests(unittest.TestCase):
             provider_filtered = monitor.store.analytics(day_start, day_end, provider_id="anthropic")
             self.assertEqual(provider_filtered["summary"]["total_with_cache"], 10)
             self.assertEqual(provider_filtered["providers"][0]["name"], "anthropic")
-            self.assertTrue(any(item["label"].startswith("opencode/space-bunny-free") for item in monitor.store.filter_options()["models"]))
+            # The model option is provider-agnostic, so the model filter can be
+            # used without narrowing by provider first.
+            model_options = monitor.store.filter_options()["models"]
+            self.assertTrue(any(item["label"] == "space-bunny-free · max" for item in model_options))
+            self.assertTrue(all(item["provider"] == "" for item in model_options))
+
 
             # Update the V2 source row and a V1 row on the next scan.
             overlap = dict(v1)
@@ -286,6 +294,7 @@ class MonitorTests(unittest.TestCase):
             config["workbuddy_enabled"] = True
             config["workbuddy_root"] = str(wb_root)
             config["dsh_enabled"] = False
+            config["codex_enabled"] = False
             config["opencode_db"] = str(empty_source)
             monitor = module.Monitor(config, data, module.logging.getLogger("test-workbuddy"))
             try:
@@ -393,6 +402,7 @@ class MonitorTests(unittest.TestCase):
             config["workbuddy_enabled"] = False
             config["dsh_enabled"] = True
             config["dsh_root"] = str(dsh_root)
+            config["codex_enabled"] = False
             monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-dsh"))
             try:
                 self.assertEqual(monitor.sync().records_seen, 2)
@@ -446,6 +456,7 @@ class MonitorTests(unittest.TestCase):
             config["workbuddy_enabled"] = False
             config["dsh_enabled"] = True
             config["dsh_root"] = str(dsh_root)
+            config["codex_enabled"] = False
             monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-dep"))
             try:
                 import builtins
@@ -467,6 +478,673 @@ class MonitorTests(unittest.TestCase):
             finally:
                 monitor.close()
 
+    # --- Codex -------------------------------------------------------------
+
+    @staticmethod
+    def codex_usage(input_: int, cached: int, output: int, reasoning: int = 0, cache_write: int = 0) -> dict:
+        """Build one cumulative ``TokenUsage`` block the way Codex writes it."""
+        return {
+            "input_tokens": input_,
+            "cached_input_tokens": cached,
+            "cache_write_input_tokens": cache_write,
+            "output_tokens": output,
+            "reasoning_output_tokens": reasoning,
+            "total_tokens": input_ + output,
+        }
+
+    def append_codex_rollout(self, path: Path, envelopes: list[dict]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            for envelope in envelopes:
+                handle.write(json.dumps(envelope, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def codex_meta(ordinal: int, **payload) -> dict:
+        return {
+            "timestamp": "2026-01-02T03:04:05.000Z",
+            "ordinal": ordinal,
+            "type": "session_meta",
+            "payload": {"timestamp": "2026-01-02T03:04:05.000Z", **payload},
+        }
+
+    @staticmethod
+    def codex_turn_context(ordinal: int, model: str, effort: str = "high") -> dict:
+        return {
+            "timestamp": "2026-01-02T03:04:06.000Z",
+            "ordinal": ordinal,
+            "type": "turn_context",
+            "payload": {"model": model, "effort": effort},
+        }
+
+    @staticmethod
+    def codex_token_count(ordinal: int, ms: int, total: dict) -> dict:
+        stamp = datetime.fromtimestamp(ms / 1000).astimezone().isoformat().replace("+00:00", "Z")
+        return {
+            "timestamp": stamp,
+            "ordinal": ordinal,
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {"total_token_usage": total, "model_context_window": 272000}},
+        }
+
+    def codex_monitor(self, root: Path, codex_root: Path) -> "module.Monitor":
+        empty_source = root / "opencode.db"
+        sqlite3.connect(empty_source).close()
+        config = dict(module.DEFAULT_CONFIG)
+        config["opencode_db"] = str(empty_source)
+        config["workbuddy_enabled"] = False
+        config["dsh_enabled"] = False
+        config["codex_enabled"] = True
+        config["codex_root"] = str(codex_root)
+        return module.Monitor(config, root / "monitor", module.logging.getLogger("test-codex"))
+
+    def test_codex_rollout_ingest_uses_deltas_and_splits_cached_tokens(self) -> None:
+        """Cumulative counters must be turned into per-request records."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            codex_root = root / ".codex"
+            rollout = codex_root / "sessions" / "2026" / "01" / "02" / "rollout-abc.jsonl"
+            t = 1_700_000_000_000
+            self.append_codex_rollout(rollout, [
+                self.codex_meta(0, session_id="sess-1", id="sess-1",
+                                cwd=r"d:\work\codex-demo", originator="Codex Desktop",
+                                model_provider="custom"),
+                self.codex_turn_context(1, "gpt-5.6-terra", effort="high"),
+                # First request: 5000 in, 4000 of it cached, 500 written, 200 out.
+                self.codex_token_count(2, t + 1000, self.codex_usage(5000, 4000, 200, 0, 500)),
+                # Codex repeats the event when a turn added no new inference.
+                self.codex_token_count(3, t + 1500, self.codex_usage(5000, 4000, 200, 0, 500)),
+                # Second request adds 1000 in (900 cached), 100 out, 40 reasoning.
+                self.codex_token_count(4, t + 2000, self.codex_usage(6000, 4900, 300, 40, 500)),
+            ])
+            monitor = self.codex_monitor(root, codex_root)
+            try:
+                # Three events, one of which repeats an unchanged total.
+                self.assertEqual(monitor.sync().records_seen, 2)
+                columns = [
+                    "message_id", "provider_id", "model_id", "variant", "agent", "session_id",
+                    "project_name", "project_path", "input_tokens", "output_tokens",
+                    "reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "cost",
+                    "total_with_cache", "total_without_cache_read",
+                ]
+                rows = monitor.store.conn.execute(
+                    "SELECT " + ",".join(columns) + " FROM usage_events WHERE source='codex' ORDER BY event_time"
+                ).fetchall()
+                self.assertEqual(len(rows), 2)
+                first, second = (dict(zip(columns, row)) for row in rows)
+                self.assertEqual(first["message_id"], "codex:rollout-abc:2")
+                self.assertEqual(second["message_id"], "codex:rollout-abc:4")
+                # A placeholder model_provider must not become the bucket name.
+                self.assertEqual(first["provider_id"], "openai")
+                self.assertEqual(first["model_id"], "gpt-5.6-terra")
+                self.assertEqual(first["variant"], "high")
+                self.assertEqual(first["agent"], "Codex Desktop")
+                self.assertEqual(first["session_id"], "sess-1")
+                self.assertEqual(first["project_path"], r"d:\work\codex-demo")
+                self.assertEqual(first["project_name"], "codex-demo")
+                # cached and cache_write are disjoint parts of input_tokens.
+                self.assertEqual(first["input_tokens"], 5000 - 4000 - 500)
+                self.assertEqual(first["cache_read_tokens"], 4000)
+                self.assertEqual(first["cache_write_tokens"], 500)
+                self.assertEqual(first["output_tokens"], 200)
+                self.assertEqual(first["reasoning_tokens"], 0)
+                # Codex records no cost, so the estimate is the only cost shown.
+                self.assertEqual(first["cost"], 0.0)
+                # total_tokens is exactly input_tokens + output_tokens.
+                self.assertEqual(first["total_with_cache"], 5000 + 200)
+                self.assertEqual(first["total_without_cache_read"], 5000 + 200 - 4000)
+                # The second record is a delta, not the running total.
+                self.assertEqual(second["input_tokens"], 1000 - 900)
+                self.assertEqual(second["cache_read_tokens"], 900)
+                self.assertEqual(second["cache_write_tokens"], 0)
+                self.assertEqual(second["reasoning_tokens"], 40)
+                self.assertEqual(second["output_tokens"], 100 - 40)
+                self.assertEqual(second["total_with_cache"], 1000 + 100)
+                summary = monitor.store.summary(0, t + 10_000)
+                self.assertEqual(summary["total_with_cache"], 5000 + 200 + 1000 + 100)
+            finally:
+                monitor.close()
+
+    def test_codex_mid_session_model_switch_uses_the_turn_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            codex_root = root / ".codex"
+            rollout = codex_root / "sessions" / "2026" / "01" / "02" / "rollout-switch.jsonl"
+            t = 1_700_000_000_000
+            self.append_codex_rollout(rollout, [
+                self.codex_meta(0, session_id="s2", id="s2", cwd=r"d:\work\p",
+                                originator="codex_cli_rs", model_provider="openai"),
+                self.codex_turn_context(1, "gpt-5.6-terra", effort="high"),
+                self.codex_token_count(2, t + 1000, self.codex_usage(1000, 0, 100)),
+                self.codex_turn_context(3, "step-5-preview", effort="medium"),
+                self.codex_token_count(4, t + 2000, self.codex_usage(2000, 0, 200)),
+            ])
+            monitor = self.codex_monitor(root, codex_root)
+            try:
+                monitor.sync()
+                rows = monitor.store.conn.execute(
+                    "SELECT model_id,variant,provider_id FROM usage_events WHERE source='codex' ORDER BY event_time"
+                ).fetchall()
+                self.assertEqual([tuple(r) for r in rows], [
+                    ("gpt-5.6-terra", "high", "openai"),
+                    # The recorded provider is kept, so the family is not used.
+                    ("step-5-preview", "medium", "openai"),
+                ])
+            finally:
+                monitor.close()
+
+    def test_codex_provider_falls_back_to_the_model_family(self) -> None:
+        self.assertEqual(module.Monitor._codex_provider("", "gpt-5.6-terra"), "openai")
+        self.assertEqual(module.Monitor._codex_provider("custom", "step-5-preview"), "stepfun")
+        self.assertEqual(module.Monitor._codex_provider("custom", "grok-4.7"), "xai")
+        # A real provider id is kept verbatim.
+        self.assertEqual(module.Monitor._codex_provider("azure", "gpt-5.6-terra"), "azure")
+        # An unrecognised family must still land somewhere nameable.
+        self.assertEqual(module.Monitor._codex_provider("custom", "mystery-1"), "openai")
+
+    def test_codex_incremental_append_does_not_double_count(self) -> None:
+        """The byte cursor plus the stored cumulative total must be exact."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            codex_root = root / ".codex"
+            rollout = codex_root / "sessions" / "2026" / "01" / "02" / "rollout-inc.jsonl"
+            t = 1_700_000_000_000
+            self.append_codex_rollout(rollout, [
+                self.codex_meta(0, session_id="s3", id="s3", cwd=r"d:\work\inc"),
+                self.codex_turn_context(1, "gpt-5.6-terra"),
+                self.codex_token_count(2, t + 1000, self.codex_usage(1000, 400, 100)),
+            ])
+            monitor = self.codex_monitor(root, codex_root)
+            try:
+                self.assertEqual(monitor.sync().records_seen, 1)
+                self.assertEqual(monitor.sync().records_seen, 0)
+                self.append_codex_rollout(rollout, [
+                    self.codex_token_count(3, t + 2000, self.codex_usage(1600, 900, 150)),
+                ])
+                # The first delta after the cursor still needs the stored
+                # baseline, otherwise it would be recorded as the full total.
+                self.assertEqual(monitor.sync().records_seen, 1)
+                rows = monitor.store.conn.execute(
+                    "SELECT input_tokens,cache_read_tokens,output_tokens FROM usage_events "
+                    "WHERE source='codex' ORDER BY event_time"
+                ).fetchall()
+                self.assertEqual([tuple(r) for r in rows], [(600, 400, 100), (100, 500, 50)])
+                self.assertEqual(monitor.store.summary(0, t + 10_000)["total_with_cache"], 1600 + 150)
+            finally:
+                monitor.close()
+
+    def test_codex_full_reconcile_regenerates_the_same_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            codex_root = root / ".codex"
+            rollout = codex_root / "sessions" / "2026" / "01" / "02" / "rollout-full.jsonl"
+            t = 1_700_000_000_000
+            self.append_codex_rollout(rollout, [
+                self.codex_meta(0, session_id="s4", id="s4", cwd=r"d:\work\full"),
+                self.codex_turn_context(1, "gpt-5.6-terra"),
+                self.codex_token_count(2, t + 1000, self.codex_usage(1000, 0, 100)),
+                self.codex_token_count(3, t + 2000, self.codex_usage(2000, 0, 200)),
+            ])
+            monitor = self.codex_monitor(root, codex_root)
+            try:
+                monitor.sync()
+                before = monitor.store.summary(0, t + 10_000)
+                self.assertEqual(before["total_with_cache"], 2200)
+                self.assertEqual(before["requests"], 2)
+                # Force the periodic full reconcile, which ignores every cursor.
+                monitor.store.set_meta("last_full_reconcile", "0")
+                monitor.store.conn.commit()
+                monitor.sync()
+                after = monitor.store.summary(0, t + 10_000)
+                self.assertEqual(after["total_with_cache"], before["total_with_cache"])
+                self.assertEqual(after["requests"], before["requests"])
+            finally:
+                monitor.close()
+
+    def test_codex_rollouts_of_one_session_are_keyed_per_file(self) -> None:
+        """A resumed or forked thread gets its own rollout; both must count."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            codex_root = root / ".codex"
+            base = codex_root / "sessions" / "2026" / "01" / "02"
+            t = 1_700_000_000_000
+            # Both files belong to session "shared" and both restart ordinal at 0.
+            self.append_codex_rollout(base / "rollout-shared.jsonl", [
+                self.codex_meta(0, session_id="shared", id="shared", cwd=r"d:\work\fork"),
+                self.codex_turn_context(1, "gpt-5.6-terra"),
+                self.codex_token_count(2, t + 1000, self.codex_usage(1000, 0, 100)),
+            ])
+            self.append_codex_rollout(base / "rollout-shared_fork.jsonl", [
+                self.codex_meta(0, session_id="shared", id="shared", cwd=r"d:\work\fork"),
+                self.codex_turn_context(1, "gpt-5.6-terra"),
+                self.codex_token_count(2, t + 2000, self.codex_usage(700, 0, 70)),
+            ])
+            monitor = self.codex_monitor(root, codex_root)
+            try:
+                self.assertEqual(monitor.sync().records_seen, 2)
+                summary = monitor.store.summary(0, t + 10_000)
+                self.assertEqual(summary["requests"], 2)
+                self.assertEqual(summary["total_with_cache"], (1000 + 100) + (700 + 70))
+            finally:
+                monitor.close()
+
+    def test_codex_reads_archived_sessions_and_ignores_rotated_backups(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            codex_root = root / ".codex"
+            t = 1_700_000_000_000
+            self.append_codex_rollout(
+                codex_root / "archived_sessions" / "rollout-old.jsonl",
+                [
+                    self.codex_meta(0, session_id="old", id="old", cwd=r"d:\work\old"),
+                    self.codex_turn_context(1, "gpt-5.6-terra"),
+                    self.codex_token_count(2, t + 1000, self.codex_usage(1000, 0, 100)),
+                ],
+            )
+            # A rollout that was rotated away is a stale copy, not extra usage.
+            self.append_codex_rollout(
+                codex_root / "sessions" / "2026" / "01" / "02" / "rollout-new.jsonl.bak-20260102-030405",
+                [
+                    self.codex_meta(0, session_id="new", id="new", cwd=r"d:\work\new"),
+                    self.codex_turn_context(1, "gpt-5.6-terra"),
+                    self.codex_token_count(2, t + 1000, self.codex_usage(9999, 0, 999)),
+                ],
+            )
+            monitor = self.codex_monitor(root, codex_root)
+            try:
+                self.assertEqual(monitor.sync().records_seen, 1)
+                health = monitor.store.source_health_report(monitor.source_health)
+                self.assertTrue(health["codex"]["available"])
+                self.assertEqual(monitor.store.summary(0, t + 10_000)["total_with_cache"], 1100)
+            finally:
+                monitor.close()
+
+    def test_codex_skips_unusable_lines_without_failing_the_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            codex_root = root / ".codex"
+            base = codex_root / "sessions" / "2026" / "01" / "02"
+            t = 1_700_000_000_000
+            self.append_codex_rollout(base / "rollout-bad.jsonl", [
+                self.codex_meta(0, session_id="s5", id="s5", cwd=r"d:\work\bad"),
+                self.codex_turn_context(1, "gpt-5.6-terra"),
+                {"type": "response_item", "ordinal": 2, "payload": {"type": "message"}},
+                {"type": "event_msg", "ordinal": 3, "payload": {"type": "token_count", "info": None}},
+                {"type": "event_msg", "ordinal": 4, "payload": {"type": "agent_message"}},
+                # An unusable stamp falls back to the session start, so the
+                # usage is kept instead of being filed under the current day.
+                {"type": "event_msg", "ordinal": 5, "timestamp": "not-a-date",
+                 "payload": {"type": "token_count",
+                             "info": {"total_token_usage": self.codex_usage(4000, 0, 400)}}},
+                self.codex_token_count(6, t + 1000, self.codex_usage(5000, 0, 500)),
+            ])
+            with (base / "rollout-bad.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write("{not json\n")
+            # With no session start either, there is no honest time to file the
+            # event under, so the record is dropped rather than invented.
+            self.append_codex_rollout(base / "rollout-nostamp.jsonl", [
+                {"type": "turn_context", "ordinal": 0, "payload": {"model": "gpt-5.6-terra"}},
+                {"type": "event_msg", "ordinal": 1, "timestamp": "not-a-date",
+                 "payload": {"type": "token_count",
+                             "info": {"total_token_usage": self.codex_usage(7000, 0, 700)}}},
+            ])
+            monitor = self.codex_monitor(root, codex_root)
+            try:
+                self.assertEqual(monitor.sync().records_seen, 2)
+                # The window is wide because the fallback stamp is the session
+                # start, which sits outside the other tests' fixed range.
+                summary = monitor.store.summary(0, 4_000_000_000_000)
+                self.assertEqual(summary["requests"], 2)
+                # The first usable event carries the whole running total, the
+                # next one only the increment on top of it.
+                self.assertEqual(summary["total_with_cache"], (4000 + 400) + (1000 + 100))
+                # The malformed trailing line must not abort the pass.
+                self.assertTrue(monitor.store.source_health_report(monitor.source_health)["codex"]["available"])
+            finally:
+                monitor.close()
+
+    def test_codex_without_ordinal_keys_by_consumed_event(self) -> None:
+        """Older rollouts carry no line counter, so the index must still be exact."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            codex_root = root / ".codex"
+            rollout = codex_root / "sessions" / "2026" / "01" / "02" / "rollout-noord.jsonl"
+            t = 1_700_000_000_000
+
+            def token_count(usage: dict) -> dict:
+                return {
+                    "timestamp": "2026-01-02T03:05:00.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {"total_token_usage": usage}},
+                }
+
+            self.append_codex_rollout(rollout, [
+                self.codex_meta(0, session_id="s6", id="s6", cwd=r"d:\work\noord"),
+                self.codex_turn_context(1, "gpt-5.6-terra"),
+                token_count(self.codex_usage(1000, 0, 100)),
+                # A repeat sits between the two real events; it must not make
+                # the second one reuse the first one's id.
+                token_count(self.codex_usage(1000, 0, 100)),
+                token_count(self.codex_usage(1500, 0, 150)),
+            ])
+            monitor = self.codex_monitor(root, codex_root)
+            try:
+                self.assertEqual(monitor.sync().records_seen, 2)
+                rows = monitor.store.conn.execute(
+                    "SELECT message_id,input_tokens FROM usage_events WHERE source='codex' ORDER BY event_time"
+                ).fetchall()
+                self.assertEqual([tuple(r) for r in rows], [
+                    ("codex:rollout-noord:0", 1000),
+                    ("codex:rollout-noord:2", 500),
+                ])
+            finally:
+                monitor.close()
+
+    def test_codex_root_detection_prefers_codex_home_env(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / "codex-home"
+            (home / "sessions").mkdir(parents=True)
+            original = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = str(home)
+            try:
+                self.assertEqual(module.detect_codex_root({}), home.resolve())
+                self.assertEqual(module.detect_codex_root({"codex_root": str(home)}), home.resolve())
+                # An explicit but missing directory falls through to the env.
+                self.assertEqual(module.detect_codex_root({"codex_root": str(root / "nope")}), home.resolve())
+                self.assertIsNone(module.detect_codex_root({"codex_enabled": False}))
+            finally:
+                if original is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = original
+
+    def test_codex_process_detection_names(self) -> None:
+        self.assertTrue(module.is_codex_process_name("Codex.exe"))
+        self.assertTrue(module.is_codex_process_name("CODEX.EXE"))
+        self.assertFalse(module.is_codex_process_name("AgentTokenMonitor.exe"))
+        self.assertIn(module.CODEX_SOURCE, module.SOURCE_ORDER)
+        self.assertEqual(module.SOURCE_LABELS[module.CODEX_SOURCE], "Codex")
+
+    # --- filter bar --------------------------------------------------------
+
+    def seed_usage(self, store, rows, base=1_700_000_000_000):
+        """Insert usage rows as (source, provider, model, variant, tokens, day_offset)."""
+        for source, provider, model, variant, tokens, offset in rows:
+            t = base + offset * 86_400_000
+            store.upsert_event(module.UsageRecord(
+                message_id=f"{source}-{provider}-{model}-{variant}-{offset}",
+                source=source, source_rank=1, session_id="s", project_id="p",
+                project_name="p", project_path="p", provider_id=provider,
+                model_id=model, variant=variant, agent="",
+                event_time=t, source_created=t, source_updated=t,
+                input_tokens=tokens, output_tokens=0, reasoning_tokens=0,
+                cache_read_tokens=0, cache_write_tokens=0, cost=0.0,
+            ))
+        store.conn.commit()
+
+    def test_model_filter_is_independent_of_the_provider_filter(self) -> None:
+        """The same model under two providers is one option and one filter."""
+        with tempfile.TemporaryDirectory() as temp:
+            store = module.Store(Path(temp))
+            try:
+                base = 1_700_000_000_000
+                self.seed_usage(store, [
+                    ("v2", "openai", "gpt-5.6", "high", 1000, 0),
+                    ("codex", "custom", "gpt-5.6", "high", 500, 0),
+                    ("v2", "openai", "other-model", "default", 10, 0),
+                ], base)
+                options = store.filter_options(base, base + 86_400_000)
+                labels = [item["label"] for item in options["models"]]
+                self.assertEqual(labels, ["gpt-5.6 · high", "other-model"])
+                # One entry, and its total spans both providers.
+                entry = next(item for item in options["models"] if item["label"] == "gpt-5.6 · high")
+                self.assertEqual(entry["total"], 1500)
+                self.assertEqual(entry["events"], 2)
+                # Selecting the model must not narrow by provider.
+                analytics = store.analytics(base, base + 86_400_000, model_key=(("gpt-5.6",), "high"))
+                self.assertEqual(analytics["summary"]["requests"], 2)
+                self.assertEqual(analytics["summary"]["total_with_cache"], 1500)
+                # Combining it with a provider filter is an AND, not a reset.
+                narrowed = store.analytics(
+                    base, base + 86_400_000, provider_id="openai", model_key=(("gpt-5.6",), "high")
+                )
+                self.assertEqual(narrowed["summary"]["requests"], 1)
+            finally:
+                store.close()
+
+    def test_filter_options_only_list_the_selected_period(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = module.Store(Path(temp))
+            try:
+                base = 1_700_000_000_000
+                self.seed_usage(store, [
+                    ("v2", "openai", "today-model", "default", 1000, 0),
+                    ("v2", "openai", "old-model", "default", 999_000, -40),
+                ], base)
+                today = store.filter_options(base, base + 86_400_000)
+                self.assertEqual([item["name"] for item in today["providers"]], ["openai"])
+                self.assertEqual([item["model"] for item in today["models"]], ["today-model"])
+                # The same call with no window keeps the pricing-dialog behaviour.
+                everything = store.filter_options()
+                self.assertEqual(
+                    sorted(item["model"] for item in everything["models"]),
+                    ["old-model", "today-model"],
+                )
+            finally:
+                store.close()
+
+    def test_filter_options_honour_the_usage_floor_and_pin_the_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = module.Store(Path(temp))
+            try:
+                base = 1_700_000_000_000
+                self.seed_usage(store, [
+                    ("v2", "big", "big-model", "default", 10_000_000, 0),
+                    ("v2", "small", "small-model", "default", 50, 0),
+                ], base)
+                options = store.filter_options(base, base + 86_400_000, min_tokens=1000)
+                self.assertEqual([item["name"] for item in options["providers"]], ["big"])
+                self.assertEqual(options["hidden"], {"providers": 1, "models": 1})
+                # A value the user already picked stays listed even under the
+                # floor, otherwise the selection would vanish silently.
+                pinned = store.filter_options(
+                    base, base + 86_400_000, min_tokens=1000, pinned_provider="small"
+                )
+                self.assertEqual([item["name"] for item in pinned["providers"]], ["big", "small"])
+                self.assertEqual(pinned["hidden"], {"providers": 0, "models": 1})
+            finally:
+                store.close()
+
+    def test_model_rules_hide_rows_without_moving_any_total(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = module.Store(Path(temp))
+            try:
+                base = 1_700_000_000_000
+                self.seed_usage(store, [
+                    ("v2", "openai", "gpt-5.6", "high", 1000, 0),
+                    ("workbuddy", "workbuddy", "noise-model", "default", 400, 0),
+                ], base)
+                rules = module.ModelRules(hidden_providers=("workbuddy",), hidden_models=("noise-*",))
+                window = (base, base + 86_400_000)
+                plain = store.analytics(*window)
+                ruled = store.analytics(*window, rules=rules)
+                # Hiding is presentation only: the totals must not move.
+                self.assertEqual(plain["summary"]["total_with_cache"], 1400)
+                self.assertEqual(ruled["summary"]["total_with_cache"], 1400)
+                self.assertEqual(plain["trend"][0]["total_with_cache"], ruled["trend"][0]["total_with_cache"])
+                # But the rankings and the log lose the hidden rows.
+                self.assertEqual([row["name"] for row in ruled["providers"]], ["openai"])
+                self.assertEqual([row["model_id"] for row in ruled["models"]], ["gpt-5.6"])
+                logged = store.analytics(*window, event_limit=100, rules=rules)
+                self.assertEqual([row["provider_id"] for row in logged["events"]], ["openai"])
+                # No rules at all is the unchanged default.
+                self.assertEqual([row["name"] for row in plain["providers"]], ["openai", "workbuddy"])
+            finally:
+                store.close()
+
+    def test_model_rules_merge_aliases_into_one_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = module.Store(Path(temp))
+            try:
+                base = 1_700_000_000_000
+                self.seed_usage(store, [
+                    ("codex", "openai", "gpt-5.6-luna", "max", 1000, 0),
+                    ("codex", "custom", "gpt-5.6-terra", "max", 500, 0),
+                    ("codex", "openai", "gpt-5.6-sol", "max", 250, 0),
+                    ("codex", "openai", "gpt-6-sol", "high", 999, 0),
+                ], base)
+                rules = module.ModelRules(aliases=(("gpt-5.6-*", "gpt-5.6"),))
+                window = (base, base + 86_400_000)
+                plain = store.analytics(*window)
+                merged = store.analytics(*window, rules=rules)
+                self.assertEqual(len(plain["models"]), 4)
+                # Merging is per provider, so two vendors stay apart while each
+                # vendor's own aliases collapse into a single row.
+                self.assertEqual(len(merged["models"]), 3)
+                row = next(r for r in merged["models"] if r["name"] == "openai/gpt-5.6 · max")
+                self.assertEqual(row["requests"], 2)
+                self.assertEqual(row["total_with_cache"], 1250)
+                other = next(r for r in merged["models"] if r["name"] == "custom/gpt-5.6 · max")
+                self.assertEqual(other["total_with_cache"], 500)
+                # Nothing was dropped: the total is identical either way.
+                self.assertEqual(merged["summary"]["total_with_cache"], plain["summary"]["total_with_cache"])
+                # The merged name is also what pricing looks up.
+                rows = store.costing_rows(*window, rules=rules)
+                self.assertEqual(sorted({row["model_id"] for row in rows}), ["gpt-5.6", "gpt-6-sol"])
+                # And the dropdown offers one entry per model, not per alias.
+                options = store.filter_options(*window, rules=rules)
+                labels = [item["label"] for item in options["models"]]
+                self.assertEqual(sorted(labels), ["gpt-5.6 · max", "gpt-6-sol · high"])
+                # Filtering on the merged name must still select every alias:
+                # the stored rows were never renamed.
+                merged_option = next(i for i in options["models"] if i["label"] == "gpt-5.6 · max")
+                self.assertEqual(sorted(merged_option["keys"]),
+                                 ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
+                selected = store.analytics(
+                    *window, model_key=(tuple(merged_option["keys"]), merged_option["variant"])
+                )
+                self.assertEqual(selected["summary"]["requests"], 3)
+                self.assertEqual(selected["summary"]["total_with_cache"], 1750)
+            finally:
+                store.close()
+
+    def test_model_rule_patterns_are_glob_or_substring(self) -> None:
+        rules = module.ModelRules(
+            hidden_providers=("WorkBuddy",),
+            hidden_models=("*-flash",),
+            aliases=(("gpt-5.6-*", "gpt-5.6"),),
+        )
+        self.assertTrue(rules.provider_hidden("workbuddy"))
+        self.assertFalse(rules.provider_hidden("openai"))
+        self.assertTrue(rules.model_hidden("deepseek-v4-flash"))
+        self.assertFalse(rules.model_hidden("deepseek-v4-pro"))
+        self.assertEqual(rules.model_name("gpt-5.6-luna"), "gpt-5.6")
+        self.assertEqual(rules.model_name("gpt-6-sol"), "gpt-6-sol")
+        # An empty pattern must never match everything.
+        self.assertFalse(module.ModelRules(hidden_providers=("",)).provider_hidden("openai"))
+
+    def test_model_rules_round_trip_through_the_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config_path = root / "config.json"
+            config_path.write_text("{}", encoding="utf-8")
+            original_config = module.app_data_dir
+            module.app_data_dir = lambda: root
+            try:
+                api = module.DashboardApi(config_path)
+                saved = api.save_model_rules(["workbuddy"], ["*-preview"], {"gpt-5.6-*": "gpt-5.6"})
+                self.assertEqual(saved["model_rules"]["hidden_providers"], ["workbuddy"])
+                self.assertEqual(saved["model_rules"]["aliases"], [["gpt-5.6-*", "gpt-5.6"]])
+                # Blank patterns and a blank rename target are dropped, not stored.
+                api.save_model_rules(["", "  "], [""], {"gpt-5.6-*": "", "keep": "x"})
+                stored = module.ModelRules.from_config(module.load_config(config_path))
+                self.assertEqual(stored.hidden_providers, ())
+                self.assertEqual(stored.hidden_models, ())
+                self.assertEqual(stored.aliases, (("keep", "x"),))
+                self.assertEqual(api.set_filter_min_tokens(250_000)["filter_min_tokens"], 250_000)
+                # A negative or nonsensical floor clamps to zero, never below.
+                self.assertEqual(api.set_filter_min_tokens(-5)["filter_min_tokens"], 0)
+                self.assertEqual(api.set_filter_min_tokens("abc")["filter_min_tokens"], 0)
+            finally:
+                module.app_data_dir = original_config
+
+    def test_pricing_model_list_keeps_the_provider_and_ignores_the_rules(self) -> None:
+        """A custom price is pinned to one provider and one real model id."""
+        with tempfile.TemporaryDirectory() as temp:
+            store = module.Store(Path(temp))
+            try:
+                base = 1_700_000_000_000
+                self.seed_usage(store, [
+                    ("openai", "openai", "gpt-5.6-luna", "max", 1000, 0),
+                    ("codex", "custom", "gpt-5.6-luna", "max", 500, 0),
+                ], base)
+                # This is the call get_pricing_settings makes: qualified models,
+                # all time, and no display rules.
+                options = store.filter_options(qualify_models=True)
+                labels = sorted(item["label"] for item in options["models"])
+                self.assertEqual(labels, ["custom/gpt-5.6-luna · max", "openai/gpt-5.6-luna · max"])
+                self.assertTrue(all(item["provider"] for item in options["models"]))
+                # Rules only reach the filter bar, and there they replace the
+                # alias with the merged name while keeping the raw names as the
+                # key a filter is applied on.
+                ruled = store.filter_options(rules=module.ModelRules(aliases=(("gpt-5.6-*", "gpt-5.6"),)))
+                entry = ruled["models"][0]
+                self.assertEqual(entry["label"], "gpt-5.6 · max")
+                self.assertEqual(sorted(entry["keys"]), ["gpt-5.6-luna"])
+            finally:
+                store.close()
+
+    def test_filter_bar_shows_usage_and_keeps_the_model_independent(self) -> None:
+        """The dropdowns must be scannable by size, and never drop a selection."""
+        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+        # Option text carries the usage, the option value stays a stable key.
+        self.assertIn("function fillSelectPairs(select, allLabel, items, selected)", html)
+        self.assertIn("${item.value ?? item.name} · ${compactFmt(item.total || 0)}", html)
+        self.assertIn("${item.label} · ${compactFmt(item.total || 0)}", html)
+        self.assertNotIn("function fillSelect(select, values, selected)", html)
+        # Picking a model must not also narrow the provider.
+        self.assertIn(
+            '$("#model-filter").addEventListener("change",e=>{state.model=e.target.value||"";loadView();});',
+            html,
+        )
+        self.assertNotIn("if(option)state.provider=option.provider;", html)
+        # The usage floor and the rules dialog both exist and are wired up.
+        self.assertIn('id="threshold-button"', html)
+        self.assertIn('id="rules-button"', html)
+        self.assertIn('id="rules-modal"', html)
+        self.assertIn('callApi("set_filter_min_tokens", value)', html)
+        self.assertIn('callApi("save_model_rules"', html)
+        self.assertIn("state.minTokens)", html)
+        # The period row must not stretch into a band of empty gaps again.
+        self.assertIn(".control-bar .segmented { flex: 0 0 auto;", html)
+        self.assertNotIn(".control-bar .segmented { flex: 1 1 100%; width: 100%; }", html)
+        # A squeezed field must not wrap its own label onto two lines.
+        self.assertIn("white-space: nowrap; flex: 0 0 auto;", html)
+
+    def test_trend_curve_is_smooth_without_inventing_peaks(self) -> None:
+        """The trend must read as a curve, not a zigzag.
+
+        Smoothing is done by interpolating the stroke, never by averaging the
+        data, so the numbers on the axis and in the tooltip stay exactly what
+        was recorded. A monotone spline is required rather than Catmull-Rom or
+        a plain Bezier, because only the monotone variant is guaranteed not to
+        bulge past a local peak and report usage that never happened.
+        """
+        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("function smoothPath(points) {", html)
+        self.assertIn("const line = smoothPath(points);", html)
+        # The straight-segment builder is what made the series look jagged.
+        self.assertNotIn('`${i?"L":"M"}', html)
+        # The two properties that make the curve safe: a sign change pins the
+        # tangent flat, and the harmonic mean keeps the interval monotone.
+        self.assertIn("if (slope[i - 1] * slope[i] <= 0) { tangent[i] = 0; continue; }", html)
+        self.assertIn("tangent[i] = (w1 + w2) / (w1 / slope[i - 1] + w2 / slope[i]);", html)
+        # Fewer points than the path builder, so the two edge cases are paths.
+        self.assertIn("if (n === 1) return `M${at(points[0])}`;", html)
+        self.assertIn("if (n === 2) return `M${at(points[0])} L${at(points[1])}`;", html)
+        # Dots thin out as the series gets dense instead of crowding the curve.
+        self.assertIn("const dotLimit = state.compact ? 18 : 30;", html)
+
     def test_source_filter_is_additive_and_selective(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = module.Store(Path(temp))
@@ -477,6 +1155,7 @@ class MonitorTests(unittest.TestCase):
                     ("v1-a", "v1", "anthropic"),
                     ("workbuddy-a", "workbuddy", "workbuddy"),
                     ("dsh-a", "dsh", "bupt"),
+                    ("codex-a", "codex", "openai"),
                 ):
                     store.upsert_event(module.UsageRecord(
                         message_id=message_id, source=source, source_rank=1,
@@ -488,17 +1167,19 @@ class MonitorTests(unittest.TestCase):
                     ))
                 store.conn.commit()
                 # An empty selection must not narrow anything.
-                self.assertEqual(store.analytics(t - 1000, t + 1000)["summary"]["requests"], 4)
-                self.assertEqual(len(store.costing_rows(t - 1000, t + 1000)), 4)
+                self.assertEqual(store.analytics(t - 1000, t + 1000)["summary"]["requests"], 5)
+                self.assertEqual(len(store.costing_rows(t - 1000, t + 1000)), 5)
                 # "opencode" covers both the v1 and v2 database layouts.
                 self.assertEqual(store.analytics(t - 1000, t + 1000, source="opencode")["summary"]["requests"], 2)
                 self.assertEqual(store.analytics(t - 1000, t + 1000, source="workbuddy")["summary"]["requests"], 1)
                 self.assertEqual(store.analytics(t - 1000, t + 1000, source="dsh")["summary"]["requests"], 1)
+                self.assertEqual(store.analytics(t - 1000, t + 1000, source="codex")["summary"]["requests"], 1)
                 self.assertEqual(store.source_clause("")[0], "")
                 values = {item["value"]: item["events"] for item in store.source_options()}
                 self.assertEqual(values["opencode"], 2)
                 self.assertEqual(values["workbuddy"], 1)
                 self.assertEqual(values["dsh"], 1)
+                self.assertEqual(values["codex"], 1)
             finally:
                 store.close()
 
@@ -540,6 +1221,7 @@ class MonitorTests(unittest.TestCase):
             config["opencode_db"] = str(bad_db)
             config["workbuddy_enabled"] = False
             config["dsh_enabled"] = False
+            config["codex_enabled"] = False
             monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-health"))
             try:
                 monitor.sync()
@@ -549,6 +1231,33 @@ class MonitorTests(unittest.TestCase):
                 self.assertTrue(health["workbuddy"]["available"])
             finally:
                 monitor.close()
+
+    def test_codex_not_installed_is_reported_not_silently_empty(self) -> None:
+        """A missing Codex home must show up as a probe result, not as no usage."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            empty_source = root / "opencode.db"
+            sqlite3.connect(empty_source).close()
+            config = dict(module.DEFAULT_CONFIG)
+            config["opencode_db"] = str(empty_source)
+            config["workbuddy_enabled"] = False
+            config["dsh_enabled"] = False
+            config["codex_enabled"] = True
+            config["codex_root"] = str(root / "no-such-codex-home")
+            original = os.environ.pop("CODEX_HOME", None)
+            try:
+                monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-codex-none"))
+                try:
+                    self.assertIsNone(monitor.codex_root)
+                    monitor.sync()
+                    health = monitor.store.source_health_report(monitor.source_health)
+                    self.assertFalse(health["codex"]["available"])
+                    self.assertEqual(health["codex"]["reason"], "not_found")
+                finally:
+                    monitor.close()
+            finally:
+                if original is not None:
+                    os.environ["CODEX_HOME"] = original
 
     def test_product_identity_is_multi_agent(self) -> None:
         """The 4.0 rename must drop the OpenCode-only branding."""

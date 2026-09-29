@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -28,7 +29,7 @@ from PIL import Image, ImageDraw
 APP_NAME = "Agent Token Monitor"
 APP_ID = "Agent.TokenMonitor"
 DATA_DIR_NAME = "AgentTokenMonitor"
-VERSION = "4.0.0"
+VERSION = "4.1.0"
 # Default window size. Chosen so the overview card, the period buttons and
 # both filter dropdowns are all visible without scrolling on a 1080p display.
 DEFAULT_WINDOW_WIDTH = 985
@@ -53,6 +54,19 @@ DSH_PROCESS_NAMES = frozenset({"deepseek harness.exe", "dsh.exe", "deepseeharnes
 DSH_PROVIDER_ID = "deepseek-harness"
 DSH_SOURCE = "dsh"
 DSH_SOURCE_RANK = 4
+CODEX_PROCESS_NAMES = frozenset({"codex.exe"})
+CODEX_PROVIDER_ID = "openai"
+CODEX_SOURCE = "codex"
+CODEX_SOURCE_RANK = 5
+# A routed install records "custom" instead of a vendor name, which would merge
+# unrelated models into a single provider bucket.
+CODEX_PLACEHOLDER_PROVIDER = "custom"
+# Live rollouts live under ``sessions``; archiving moves the file next to it and
+# the usage it recorded stays just as real, so both trees are read.
+CODEX_ROLLOUT_DIRS = ("sessions", "archived_sessions")
+# The counters Codex keeps as a running total per thread. A delta is derived
+# from consecutive values, so all of them have to be carried in the cursor.
+CODEX_USAGE_FIELDS = ("input", "cached", "cache_write", "output", "reasoning", "total")
 
 # Dashboard "source" selector values mapped to the raw ``usage_events.source``
 # values they cover. An empty selection means "all sources", which keeps the
@@ -61,13 +75,15 @@ SOURCE_GROUPS: dict[str, tuple[str, ...]] = {
     "opencode": ("v1", "v2"),
     WORKBUDDY_SOURCE: (WORKBUDDY_SOURCE,),
     DSH_SOURCE: (DSH_SOURCE,),
+    CODEX_SOURCE: (CODEX_SOURCE,),
 }
 SOURCE_LABELS: dict[str, str] = {
     "opencode": "OpenCode",
     WORKBUDDY_SOURCE: "WorkBuddy",
     DSH_SOURCE: "DeepSeek Harness",
+    CODEX_SOURCE: "Codex",
 }
-SOURCE_ORDER: tuple[str, ...] = ("opencode", WORKBUDDY_SOURCE, DSH_SOURCE)
+SOURCE_ORDER: tuple[str, ...] = ("opencode", WORKBUDDY_SOURCE, DSH_SOURCE, CODEX_SOURCE)
 DASHBOARD_WINDOW: Any = None
 PRICING_MEMORY: dict[str, Any] = {}
 PRICING_MEMORY_META: dict[str, Any] = {}
@@ -110,6 +126,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "workbuddy_root": "",
     "dsh_enabled": True,
     "dsh_root": "",
+    "codex_enabled": True,
+    "codex_root": "",
     "sample_interval_seconds": 300,
     "daily_alert_tokens": 10_000_000,
     "spike_window_minutes": 30,
@@ -126,6 +144,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "pricing_multiplier": 1.0,
     "display_currency": "USD",
     "usd_cny_rate": 7.20,
+    "filter_min_tokens": 0,
+    "model_rules": {"hidden_providers": [], "hidden_models": [], "aliases": {}},
     "custom_pricing": {"default": {}, "models": []},
 }
 
@@ -386,6 +406,155 @@ def custom_rates_for_row(config: dict[str, Any] | None, row: dict[str, Any]) -> 
     return None, "custom:unconfigured"
 
 
+def _rule_matcher(pattern: str) -> re.Pattern[str] | None:
+    """Compile one rule pattern into a case-insensitive matcher.
+
+    A pattern containing ``*`` or ``?`` is a glob; anything else matches as a
+    plain substring, so ``custom`` hides every provider that contains it
+    without the user having to spell out ``*custom*``.
+    """
+    text = str(pattern or "").strip()
+    if not text:
+        return None
+    if "*" in text or "?" in text:
+        expression = "".join(".*" if ch == "*" else "." if ch == "?" else re.escape(ch) for ch in text)
+    else:
+        expression = re.escape(text)
+    try:
+        return re.compile(expression, re.IGNORECASE)
+    except re.error:
+        return None
+
+
+@dataclass
+class ModelRules:
+    """Display rules for providers and models.
+
+    Hiding is presentation only: a hidden provider or model still counts
+    towards every total, it just stops appearing in the filter lists and the
+    rankings. Merging only renames, so the grouped rows still add up to exactly
+    the same numbers.
+
+    Both are applied while rows are being read rather than when they are
+    stored, so the database keeps exactly what the agents reported and dropping
+    a rule brings the original rows straight back. They are enforced in Python
+    on the already-grouped result instead of in SQL, which keeps one
+    implementation of the matching and leaves every query untouched.
+    """
+
+    hidden_providers: tuple[str, ...] = ()
+    hidden_models: tuple[str, ...] = ()
+    aliases: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        # Compiled once, because these are called per row and costing_rows
+        # can return tens of thousands of them.
+        self._provider_matchers = tuple(
+            m for m in map(_rule_matcher, self.hidden_providers) if m
+        )
+        self._model_matchers = tuple(m for m in map(_rule_matcher, self.hidden_models) if m)
+        self._alias_matchers = tuple(
+            (m, target)
+            for m, target in ((_rule_matcher(p), t) for p, t in self.aliases)
+            if m
+        )
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any] | None) -> "ModelRules":
+        raw = (config or {}).get("model_rules")
+        if not isinstance(raw, dict):
+            return cls()
+
+        def patterns(key: str) -> tuple[str, ...]:
+            value = raw.get(key)
+            if not isinstance(value, list):
+                return ()
+            return tuple(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+
+        aliases: list[tuple[str, str]] = []
+        mapping = raw.get("aliases")
+        if isinstance(mapping, dict):
+            for pattern, target in mapping.items():
+                # An empty target would collapse a model into a nameless row.
+                if str(pattern or "").strip() and str(target or "").strip():
+                    aliases.append((str(pattern).strip(), str(target).strip()))
+        return cls(patterns("hidden_providers"), patterns("hidden_models"), tuple(aliases))
+
+    def is_empty(self) -> bool:
+        return not (self._provider_matchers or self._model_matchers or self._alias_matchers)
+
+    def model_name(self, value: Any) -> str:
+        text = str(value or "")
+        for matcher, target in self._alias_matchers:
+            if matcher.search(text):
+                return target
+        return text
+
+    def provider_hidden(self, value: Any) -> bool:
+        text = str(value or "")
+        return any(matcher.search(text) for matcher in self._provider_matchers)
+
+    def model_hidden(self, value: Any) -> bool:
+        text = str(value or "")
+        return any(matcher.search(text) for matcher in self._model_matchers)
+
+    def row_hidden(self, row: dict[str, Any]) -> bool:
+        return self.provider_hidden(row.get("provider_id", row.get("name"))) or self.model_hidden(
+            row.get("model_id", row.get("name"))
+        )
+
+    def apply_to_models(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Merge alias matches and drop hidden providers or models.
+
+        Aggregation is done here rather than in SQL: there are only ever a few
+        hundred distinct model keys, and doing it in one place means the
+        rankings, the filter list and the exports can never disagree.
+
+        Each merged row also carries ``keys``: the raw ``model_id`` values it
+        stands for. A filter on a merged name has to match those, because the
+        stored rows still hold the original names.
+        """
+        merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for row in rows:
+            provider = str(row.get("provider_id") or row.get("name") or "")
+            raw = str(row.get("model_id") or "")
+            if self.provider_hidden(provider) or self.model_hidden(raw):
+                continue
+            variant = str(row.get("variant") or "default")
+            key = (provider, self.model_name(raw), variant)
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = dict(row, provider_id=provider, model_id=key[1], variant=variant, keys=[raw])
+                continue
+            if raw not in existing["keys"]:
+                existing["keys"].append(raw)
+            for field in TOKEN_FIELDS:
+                existing[field] = safe_int(existing.get(field)) + safe_int(row.get(field))
+            for field in ("total_with_cache", "total_without_cache_read"):
+                existing[field] = safe_int(existing.get(field)) + safe_int(row.get(field))
+            existing["cost"] = safe_float(existing.get("cost")) + safe_float(row.get("cost"))
+            existing["requests"] = safe_int(existing.get("requests")) + safe_int(row.get("requests"))
+        for row in merged.values():
+            row["name"] = f"{row['provider_id']}/{row['model_id']}" + (
+                f" · {row['variant']}" if row["variant"] and row["variant"] != "default" else ""
+            )
+        return list(merged.values())
+
+    def apply_to_providers(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [row for row in rows if not self.provider_hidden(row.get("name"))]
+
+
+def model_filter_label(model: str, variant: str, provider: str = "") -> str:
+    """Label for one model option.
+
+    The filter bar leaves the provider out on purpose, so the same model can be
+    picked without first narrowing by provider. The pricing dialog passes it,
+    because a custom price has to be pinned to one provider.
+    """
+    prefix = f"{provider}/" if provider else ""
+    return f"{prefix}{model}" + (f" · {variant}" if variant and variant != "default" else "")
+
+
 def load_config(path: Path) -> dict[str, Any]:
     config = dict(DEFAULT_CONFIG)
     if path.exists():
@@ -492,6 +661,37 @@ def detect_dsh_root(config: dict[str, Any]) -> Path | None:
     return None
 
 
+def detect_codex_root(config: dict[str, Any]) -> Path | None:
+    """Locate the Codex home directory that holds session rollout logs.
+
+    Codex honours ``CODEX_HOME`` and otherwise falls back to ``~/.codex``, with
+    some Windows builds using a roaming profile directory instead. Only the data
+    directory is read. No Codex CLI is invoked and no request is made to the
+    OpenAI backend.
+    """
+    if not config.get("codex_enabled", True):
+        return None
+    candidates: list[Path] = []
+    configured = str(config.get("codex_root") or "").strip()
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    env_home = os.environ.get("CODEX_HOME")
+    if env_home:
+        candidates.append(Path(env_home).expanduser())
+    home = Path.home()
+    candidates.extend(
+        [
+            home / ".codex",
+            home / "AppData" / "Roaming" / "codex",
+            home / "AppData" / "Local" / "codex",
+        ]
+    )
+    for candidate in candidates:
+        if any((candidate / name).is_dir() for name in CODEX_ROLLOUT_DIRS):
+            return candidate.resolve()
+    return None
+
+
 def is_opencode_process_name(name: str) -> bool:
     return name.strip().lower() in OPENCODE_PROCESS_NAMES
 
@@ -502,6 +702,10 @@ def is_workbuddy_process_name(name: str) -> bool:
 
 def is_dsh_process_name(name: str) -> bool:
     return name.strip().lower() in DSH_PROCESS_NAMES
+
+
+def is_codex_process_name(name: str) -> bool:
+    return name.strip().lower() in CODEX_PROCESS_NAMES
 
 
 def _any_process_running(names: frozenset[str]) -> bool:
@@ -561,9 +765,18 @@ def dsh_is_running() -> bool:
     return _any_process_running(DSH_PROCESS_NAMES)
 
 
+def codex_is_running() -> bool:
+    return _any_process_running(CODEX_PROCESS_NAMES)
+
+
 def any_source_running() -> bool:
     """True when at least one monitored application is running."""
-    return opencode_is_running() or workbuddy_is_running() or dsh_is_running()
+    return (
+        opencode_is_running()
+        or workbuddy_is_running()
+        or dsh_is_running()
+        or codex_is_running()
+    )
 
 
 def shutil_which(name: str) -> str | None:
@@ -909,20 +1122,141 @@ class Store:
         ).fetchone()
         return dict(row)
 
-    def filter_options(self) -> dict[str, list[Any]]:
-        providers = [
-            str(row[0])
-            for row in self.conn.execute("SELECT DISTINCT provider_id FROM usage_events ORDER BY provider_id COLLATE NOCASE")
-            if str(row[0] or "")
+    def filter_options(
+        self,
+        start_ms: int = 0,
+        end_ms: int | None = None,
+        source: str | None = None,
+        min_tokens: int = 0,
+        pinned_provider: str = "",
+        pinned_model: str = "",
+        rules: ModelRules | None = None,
+        qualify_models: bool = False,
+    ) -> dict[str, Any]:
+        """Options for the filter bar, scoped to a period and ranked by usage.
+
+        Offering every provider and model ever recorded is what makes a long
+        dropdown unusable, so the options are the ones that actually moved
+        inside the selected period and source, ordered by the same number the
+        tables show. ``min_tokens`` drops the tail, but anything already
+        selected is always kept so a live selection can never vanish from its
+        own list when the period or the threshold changes.
+
+        Models are grouped across providers by default, which is what makes the
+        model filter independent of the provider filter. ``qualify_models``
+        restores the per-provider grouping for the pricing dialog, which has to
+        name one provider and must therefore ignore the display rules.
+
+        The default arguments preserve the all-time behaviour the pricing
+        dialog depends on: it can price any model ever used, not only the ones
+        used in the current window.
+        """
+        rules = rules or ModelRules()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if start_ms > 0:
+            clauses.append("event_time >= ?")
+            params.append(int(start_ms))
+        if end_ms is not None:
+            clauses.append("event_time < ?")
+            params.append(int(end_ms))
+        source_sql, source_params = self.source_clause(source)
+        if source_sql:
+            clauses.append(source_sql)
+            params.extend(source_params)
+        where = " AND ".join(clauses) if clauses else "1=1"
+        floor = max(0, safe_int(min_tokens))
+
+        providers_all = [
+            {"name": str(row[0] or ""), "total": safe_int(row[1]), "events": safe_int(row[2])}
+            for row in self.conn.execute(
+                f"""
+                SELECT provider_id,COALESCE(SUM(total_with_cache),0),COUNT(*)
+                FROM usage_events WHERE {where}
+                GROUP BY provider_id ORDER BY 2 DESC
+                """,
+                params,
+            ).fetchall()
         ]
-        models: list[dict[str, str]] = []
-        for row in self.conn.execute(
-            "SELECT DISTINCT provider_id,model_id,variant FROM usage_events ORDER BY provider_id,model_id,variant"
-        ):
-            provider, model, variant = (str(row[0] or ""), str(row[1] or ""), str(row[2] or ""))
-            label = f"{provider}/{model}" + (f" · {variant}" if variant and variant != "default" else "")
-            models.append({"provider": provider, "model": model, "variant": variant, "label": label})
-        return {"providers": providers, "models": models, "sources": self.source_options()}
+        # Normalise to one shape first, so the cross-provider merge below and
+        # the option mapping after it never disagree about key names.
+        grouped = [
+            {
+                "provider": str(row.get("provider_id") or ""),
+                "model": str(row["model_id"]),
+                "variant": str(row["variant"]),
+                "keys": list(row.get("keys") or [row["model_id"]]),
+                "total": safe_int(row["total_with_cache"]),
+                "events": safe_int(row["requests"]),
+            }
+            for row in rules.apply_to_models([
+                {
+                    "provider_id": str(row[0] or ""),
+                    "model_id": str(row[1] or ""),
+                    "variant": str(row[2] or "default"),
+                    "total_with_cache": safe_int(row[3]),
+                    "requests": safe_int(row[4]),
+                }
+                for row in self.conn.execute(
+                    f"""
+                    SELECT provider_id,model_id,variant,
+                           COALESCE(SUM(total_with_cache),0),COUNT(*)
+                    FROM usage_events WHERE {where}
+                    GROUP BY provider_id,model_id,variant ORDER BY 4 DESC
+                    """,
+                    params,
+                ).fetchall()
+            ])
+        ]
+        if not qualify_models:
+            # One entry per model, summing across providers, so the model filter
+            # stands on its own instead of repeating the provider filter.
+            across: dict[tuple[str, str], dict[str, Any]] = {}
+            for row in grouped:
+                key = (row["model"], row["variant"])
+                merged = across.get(key)
+                if merged is None:
+                    across[key] = dict(row, provider="", keys=list(row.get("keys") or []),
+                                       total=row["total"], events=row["events"])
+                    continue
+                merged["total"] += row["total"]
+                merged["events"] += row["events"]
+                for raw in row.get("keys") or []:
+                    if raw not in merged["keys"]:
+                        merged["keys"].append(raw)
+            grouped = list(across.values())
+        models_all = [
+            {
+                **row,
+                "keys": list(row.get("keys") or [row["model"]]),
+                "label": model_filter_label(row["model"], row["variant"], row["provider"]),
+            }
+            for row in grouped
+        ]
+        models_all.sort(key=lambda row: row["total"], reverse=True)
+        providers_all = [row for row in rules.apply_to_providers(providers_all) if row["name"]]
+
+        def visible(rows: list[dict[str, Any]], key: str, pinned: str) -> tuple[list[dict[str, Any]], int]:
+            kept: list[dict[str, Any]] = []
+            hidden = 0
+            for row in rows:
+                if row[key] == pinned or row["total"] >= floor:
+                    kept.append(row)
+                else:
+                    hidden += 1
+            return kept, hidden
+
+        providers_kept, hidden_providers = visible(providers_all, "name", str(pinned_provider or ""))
+        models_kept, hidden_models = visible(models_all, "label", str(pinned_model or ""))
+        return {
+            "providers": providers_kept,
+            "models": models_kept,
+            "sources": self.source_options(),
+            # Reported so the UI can say what the threshold is hiding instead of
+            # silently presenting a short list as if it were the whole truth.
+            "hidden": {"providers": hidden_providers, "models": hidden_models},
+            "min_tokens": floor,
+        }
 
     def sources_in_range(self, start_ms: int, end_ms: int) -> list[str]:
         """Return the distinct raw ``source`` values recorded in a time range."""
@@ -1010,7 +1344,7 @@ class Store:
         start_ms: int,
         end_ms: int,
         provider_id: str | None = None,
-        model_key: tuple[str, str, str] | None = None,
+        model_key: tuple[tuple[str, ...], str] | None = None,
         project_name: str | None = None,
         source: str | None = None,
     ) -> tuple[str, list[Any]]:
@@ -1024,8 +1358,16 @@ class Store:
             clauses.append("provider_id = ?")
             params.append(provider_id)
         if model_key:
-            clauses.extend(("provider_id = ?", "model_id = ?", "variant = ?"))
-            params.extend(model_key)
+            # Deliberately no provider clause: the model filter is independent
+            # of the provider one, so the same model is one entry no matter
+            # which provider served it. The ids are the raw names, because a
+            # merge is a display rule and the stored rows never changed.
+            model_ids, variant = model_key
+            names = [str(name) for name in model_ids] or [""]
+            clauses.append("model_id IN (" + ",".join("?" for _ in names) + ")")
+            params.extend(names)
+            clauses.append("variant = ?")
+            params.append(variant)
         if project_name:
             clauses.append("project_name = ?")
             params.append(project_name)
@@ -1068,11 +1410,12 @@ class Store:
         end_ms: int,
         *,
         provider_id: str | None = None,
-        model_key: tuple[str, str, str] | None = None,
+        model_key: tuple[tuple[str, ...], str] | None = None,
         project_name: str | None = None,
         granularity: str = "day",
         event_limit: int = 1000,
         source: str | None = None,
+        rules: ModelRules | None = None,
     ) -> dict[str, Any]:
         where, params = self._analytics_where(start_ms, end_ms, provider_id, model_key, project_name, source)
         if start_ms <= 0:
@@ -1110,17 +1453,6 @@ class Store:
         ]
         trend = self._fill_time_buckets(trend, start_ms, end_ms, granularity)
 
-        providers = [
-            dict(row)
-            for row in self.conn.execute(
-                f"""
-                SELECT provider_id AS name,{aggregate}
-                FROM usage_events WHERE {where}
-                GROUP BY provider_id ORDER BY total_with_cache DESC
-                """,
-                params,
-            ).fetchall()
-        ]
         models = [
             dict(row)
             for row in self.conn.execute(
@@ -1133,10 +1465,28 @@ class Store:
                 params,
             ).fetchall()
         ]
+        if rules is not None:
+            # Merging and hiding happen here, after SQL, so the totals, the
+            # trend and the summary are untouched and still include every
+            # hidden row. Only the visible ranking changes.
+            models = rules.apply_to_models(models)
         for row in models:
             row["name"] = f"{row['provider_id']}/{row['model_id']}" + (
                 f" · {row['variant']}" if row["variant"] and row["variant"] != "default" else ""
             )
+        providers = [
+            dict(row)
+            for row in self.conn.execute(
+                f"""
+                SELECT provider_id AS name,{aggregate}
+                FROM usage_events WHERE {where}
+                GROUP BY provider_id ORDER BY total_with_cache DESC
+                """,
+                params,
+            ).fetchall()
+        ]
+        if rules is not None:
+            providers = rules.apply_to_providers(providers)
         projects = [
             dict(row)
             for row in self.conn.execute(
@@ -1167,6 +1517,12 @@ class Store:
                     (*params, max(1, int(event_limit))),
                 ).fetchall()
             ]
+            if rules is not None:
+                # The log is a table too, so hidden rows disappear from it. The
+                # summary they contributed to above is deliberately left alone.
+                events = [row for row in events if not rules.row_hidden(row)]
+                for row in events:
+                    row["model_id"] = rules.model_name(row["model_id"])
         return {
             "start_ms": start_ms,
             "end_ms": end_ms,
@@ -1184,12 +1540,13 @@ class Store:
         start_ms: int,
         end_ms: int,
         provider_id: str | None = None,
-        model_key: tuple[str, str, str] | None = None,
+        model_key: tuple[tuple[str, ...], str] | None = None,
         project_name: str | None = None,
         source: str | None = None,
+        rules: ModelRules | None = None,
     ) -> list[dict[str, Any]]:
         where, params = self._analytics_where(start_ms, end_ms, provider_id, model_key, project_name, source)
-        return [
+        rows = [
             dict(row)
             for row in self.conn.execute(
                 f"""
@@ -1202,6 +1559,14 @@ class Store:
                 params,
             ).fetchall()
         ]
+        if rules is not None and not rules.is_empty():
+            # Renaming here is what makes a merge also fix pricing: model.dev
+            # is asked about the merged name, which is the one that exists in
+            # the catalogue. Hidden rows are kept, because hiding must not move
+            # any total.
+            for row in rows:
+                row["model_id"] = rules.model_name(row["model_id"])
+        return rows
 
     def top_groups(self, column: str, start_ms: int, limit: int = 5) -> list[dict[str, Any]]:
         if column not in {"provider_id", "model_id", "project_id", "project_name"}:
@@ -1275,6 +1640,9 @@ class Monitor:
         self.dsh_root = detect_dsh_root(config)
         if self.dsh_root:
             self.config["dsh_root"] = str(self.dsh_root)
+        self.codex_root = detect_codex_root(config)
+        if self.codex_root:
+            self.config["codex_root"] = str(self.codex_root)
 
     def _read_source_rows(self, full: bool) -> tuple[list[UsageRecord], dict[str, int]]:
         records: list[UsageRecord] = []
@@ -1282,9 +1650,11 @@ class Monitor:
         # Cursors are buffered and flushed inside the sync transaction, so the
         # read path never commits and never nests a transaction.
         self._pending_workbuddy_cursors: dict[str, int] = {}
+        self._pending_codex_cursors: dict[str, dict[str, Any]] = {}
         watermarks.update(self._read_opencode_rows(records, full))
         watermarks.update(self._read_workbuddy_rows(records, full))
         watermarks.update(self._read_dsh_rows(records, full))
+        watermarks.update(self._read_codex_rows(records, full))
         return records, watermarks
 
     def _flush_workbuddy_cursors(self) -> None:
@@ -1725,6 +2095,345 @@ class Monitor:
             model = "unknown"
         return provider, model, variant
 
+    # --- Codex -------------------------------------------------------------
+
+    def _codex_cursor_key(self) -> str:
+        return "codex_scan_offsets"
+
+    def _new_codex_cursor(self) -> dict[str, Any]:
+        return {
+            "offset": 0,
+            "index": 0,
+            "usage": {field: 0 for field in CODEX_USAGE_FIELDS},
+            "context": {},
+        }
+
+    def _codex_cursors(self) -> dict[str, dict[str, Any]]:
+        try:
+            raw = json.loads(self.store.get_meta(self._codex_cursor_key(), "{}"))
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        cursors: dict[str, dict[str, Any]] = {}
+        for key, value in raw.items():
+            if isinstance(value, dict):
+                cursors[str(key)] = value
+        return cursors
+
+    def _queue_codex_cursor(self, key: str, state: dict[str, Any]) -> None:
+        pending = getattr(self, "_pending_codex_cursors", None)
+        if pending is None:
+            pending = self._pending_codex_cursors = {}
+        pending[key] = state
+
+    def _flush_codex_cursors(self) -> None:
+        pending = getattr(self, "_pending_codex_cursors", None)
+        if not pending:
+            return
+        cursors = self._codex_cursors()
+        cursors.update(pending)
+        # Drop entries for rollouts that no longer exist, so the meta row cannot
+        # grow without bound as sessions come and go. A cursor that disappears
+        # only costs a full re-read, which regenerates the very same rows.
+        cursors = {key: state for key, state in cursors.items() if Path(key).is_file()}
+        self.store.set_meta(self._codex_cursor_key(), json.dumps(cursors))
+        self._pending_codex_cursors = {}
+
+    def _read_codex_rows(
+        self, records: list[UsageRecord], full: bool
+    ) -> dict[str, int]:
+        """Read Codex session rollout logs and append UsageRecords.
+
+        Codex appends one JSON line per event to
+        ``<codex_root>/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl``. Per-request
+        usage arrives on ``event_msg`` events whose inner type is
+        ``token_count``; its ``info.total_token_usage`` is a running total for
+        the whole thread, so every record here carries the delta against the
+        previous event instead of the cumulative figure. Codex repeats a
+        ``token_count`` event with an unchanged total whenever a turn added no
+        new inference, and those repeats advance nothing and are skipped.
+
+        The logs are append-only, so file size is the incremental cursor. The
+        last cumulative snapshot and the session context ride along in the
+        cursor, because a read that starts mid-file has no other way to learn
+        either one.
+        """
+        if not self.codex_root:
+            if self.config.get("codex_enabled", True):
+                self.source_health[CODEX_SOURCE] = {
+                    "available": False,
+                    "reason": "not_found",
+                    "detail": str(self.config.get("codex_root") or "$CODEX_HOME or ~/.codex"),
+                }
+            return {}
+        watermarks: dict[str, int] = {}
+        paths: list[Path] = []
+        for name in CODEX_ROLLOUT_DIRS:
+            base = self.codex_root / name
+            if base.is_dir():
+                # The glob is exact on purpose: a rollout that was rotated to
+                # ``.jsonl.bak-<stamp>`` is a stale copy and must not be counted
+                # a second time.
+                paths.extend(sorted(base.rglob("rollout-*.jsonl")))
+        if not paths:
+            self.source_health[CODEX_SOURCE] = {
+                "available": False,
+                "reason": "no_sessions_dir",
+                "detail": ", ".join(str(self.codex_root / name) for name in CODEX_ROLLOUT_DIRS),
+            }
+            return {}
+        self.source_health[CODEX_SOURCE] = {"available": True, "reason": "", "detail": ""}
+        cursors = self._codex_cursors()
+        for path in paths:
+            key = str(path)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            saved = cursors.get(key) or {}
+            # A file that shrank was rewritten, and the byte cursor cannot tell
+            # that from truncation, so start over. Re-reading is safe: the
+            # records are keyed by line ordinal and the upsert is idempotent.
+            state = self._new_codex_cursor() if full or size < safe_int(saved.get("offset")) else saved
+            try:
+                found, state, restart = self._read_codex_file(path, state)
+            except OSError as exc:
+                self.logger.warning("Cannot read Codex rollout %s: %s", path, exc)
+                continue
+            if restart:
+                self.logger.info("Codex rollout %s rewrote its token totals; re-reading", path)
+                found, state, _restart = self._read_codex_file(path, self._new_codex_cursor())
+            records.extend(found)
+            self._queue_codex_cursor(key, state)
+            for record in found:
+                if record.event_time > watermarks.get(CODEX_SOURCE, 0):
+                    watermarks[CODEX_SOURCE] = record.event_time
+        return watermarks
+
+    def _read_codex_file(
+        self, path: Path, state: dict[str, Any]
+    ) -> tuple[list[UsageRecord], dict[str, Any], bool]:
+        """Parse one rollout file from ``state['offset']``.
+
+        Returns the records found, the cursor state to persist, and whether the
+        cumulative totals went backwards. A decrease means the file was replaced
+        rather than appended to, and the caller has to read it again from the
+        top.
+        """
+        records: list[UsageRecord] = []
+        context: dict[str, str] = {
+            str(key): str(value)
+            for key, value in (state.get("context") or {}).items()
+            if value
+        }
+        index = safe_int(state.get("index"))
+        usage = {
+            field: safe_int((state.get("usage") or {}).get(field))
+            for field in CODEX_USAGE_FIELDS
+        }
+        offset = max(0, safe_int(state.get("offset")))
+        restart = False
+        with path.open("rb") as handle:
+            if offset:
+                handle.seek(offset)
+            for line in handle:
+                # Only advance to a complete line, so a record still being
+                # written is picked up on the next pass.
+                complete = line.endswith(b"\n")
+                if not line.strip():
+                    if complete:
+                        offset += len(line)
+                    continue
+                try:
+                    envelope = json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    self.logger.debug("Skipping malformed Codex line in %s", path)
+                    if complete:
+                        offset += len(line)
+                    continue
+                if not isinstance(envelope, dict):
+                    if complete:
+                        offset += len(line)
+                    continue
+                record, context, index, usage, decreased = self._consume_codex_line(
+                    path, envelope, context, index, usage
+                )
+                if record:
+                    records.append(record)
+                if decreased:
+                    restart = True
+                    break
+                if complete:
+                    offset += len(line)
+        if restart:
+            return [], self._new_codex_cursor(), True
+        return records, {"offset": offset, "index": index, "usage": usage, "context": context}, False
+
+    def _consume_codex_line(
+        self,
+        path: Path,
+        envelope: dict[str, Any],
+        context: dict[str, str],
+        index: int,
+        usage: dict[str, int],
+    ) -> tuple[UsageRecord | None, dict[str, str], int, dict[str, int], bool]:
+        """Fold one rollout line into the per-file state.
+
+        Returns the record to append (if the line reported new usage), the
+        updated context, the updated record counter, the updated cumulative
+        usage, and whether the cumulative totals moved backwards.
+        """
+        kind = str(envelope.get("type") or "")
+        payload = envelope.get("payload")
+        if not isinstance(payload, dict):
+            return None, context, index, usage, False
+
+        if kind == "session_meta":
+            session_id = str(payload.get("session_id") or payload.get("id") or "")
+            context["session_id"] = session_id or context.get("session_id", "")
+            context["agent"] = str(payload.get("originator") or context.get("agent", ""))
+            context["cwd"] = str(payload.get("cwd") or context.get("cwd", ""))
+            context["model_provider"] = str(
+                payload.get("model_provider") or context.get("model_provider", "")
+            )
+            context["started_at"] = str(payload.get("timestamp") or context.get("started_at", ""))
+            return None, context, index, usage, False
+
+        if kind == "turn_context":
+            # Emitted at the start of a turn and again on every model switch, so
+            # the last one seen is the route the following requests took.
+            if payload.get("model"):
+                context["model"] = str(payload["model"])
+            if payload.get("effort"):
+                context["effort"] = str(payload["effort"])
+            if payload.get("cwd"):
+                context["cwd"] = str(payload["cwd"])
+            return None, context, index, usage, False
+
+        if kind != "event_msg" or str(payload.get("type") or "") != "token_count":
+            return None, context, index, usage, False
+
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            return None, context, index, usage, False
+        # The cumulative block is authoritative. Older rollouts only carry the
+        # per-request block, which is then used as-is and moves the baseline.
+        current = self._codex_usage(info.get("total_token_usage")) or self._codex_usage(
+            info.get("last_token_usage")
+        )
+        if not current:
+            return None, context, index, usage, False
+        delta = {field: current[field] - usage[field] for field in CODEX_USAGE_FIELDS}
+        if any(value < 0 for value in delta.values()):
+            # A cumulative counter cannot shrink, so the log was replaced.
+            return None, context, index, usage, True
+        usage = current
+        if not any(delta.values()):
+            # Codex repeats the event when a turn added no new inference. The
+            # counter still moves, so a build without ``ordinal`` numbers its
+            # records by consumed events rather than by recorded ones.
+            return None, context, index + 1, usage, False
+
+        session_id = context.get("session_id") or path.stem
+        # A root session can own several rollout files (a resumed or forked
+        # thread gets its own), and every one of them restarts ``ordinal`` at
+        # zero. Keying on the file name is what keeps those apart; it is also
+        # stable when archiving moves the file from ``sessions`` to
+        # ``archived_sessions``, which a directory-based key would not be.
+        # ``ordinal`` is the writer's own line counter; the running index is the
+        # fallback for builds that omit it.
+        ordinal = safe_int(envelope.get("ordinal")) if envelope.get("ordinal") is not None else index
+        key = f"codex:{path.stem}:{ordinal}"
+        event_time = self._codex_event_time(envelope, context)
+        if event_time <= 0:
+            self.logger.debug("Codex rollout %s has an unusable timestamp; skipping record", path)
+            return None, context, index + 1, usage, False
+
+        cwd = context.get("cwd", "")
+        model = context.get("model") or "unknown"
+        cached = delta["cached"]
+        cache_write = delta["cache_write"]
+        reasoning = delta["reasoning"]
+        record = UsageRecord(
+            message_id=key,
+            source=CODEX_SOURCE,
+            source_rank=CODEX_SOURCE_RANK,
+            session_id=session_id,
+            project_id=cwd or session_id,
+            project_name=Path(cwd).name if cwd else "codex",
+            project_path=cwd,
+            provider_id=self._codex_provider(context.get("model_provider", ""), model),
+            model_id=model,
+            variant=context.get("effort") or "default",
+            agent=context.get("agent") or "codex",
+            event_time=event_time,
+            source_created=event_time,
+            source_updated=event_time,
+            # Codex counts ``cached_input_tokens`` and ``cache_write_input_tokens``
+            # as disjoint parts of ``input_tokens``, and ``reasoning_output_tokens``
+            # as a part of ``output_tokens``, so both are subtracted here to keep
+            # the five categories mutually exclusive the way the totals expect.
+            # ``total_tokens`` is exactly ``input_tokens + output_tokens``, which
+            # makes it the value this record's ``total_with_cache`` reproduces.
+            input_tokens=max(0, delta["input"] - cached - cache_write),
+            output_tokens=max(0, delta["output"] - reasoning),
+            reasoning_tokens=reasoning,
+            cache_read_tokens=cached,
+            cache_write_tokens=cache_write,
+            # Codex records no cost, so the model.dev estimate stays the only
+            # cost this source can ever show.
+            cost=0.0,
+        )
+        return record, context, index + 1, usage, False
+
+    @staticmethod
+    def _codex_usage(value: Any) -> dict[str, int]:
+        if not isinstance(value, dict):
+            return {}
+        return {
+            "input": safe_int(value.get("input_tokens")),
+            "cached": safe_int(value.get("cached_input_tokens")),
+            "cache_write": safe_int(value.get("cache_write_input_tokens")),
+            "output": safe_int(value.get("output_tokens")),
+            "reasoning": safe_int(value.get("reasoning_output_tokens")),
+            "total": safe_int(value.get("total_tokens")),
+        }
+
+    @staticmethod
+    def _codex_event_time(envelope: dict[str, Any], context: dict[str, str]) -> int:
+        """Convert a rollout timestamp to epoch milliseconds.
+
+        Every line is stamped. Falling back to the session start keeps a record
+        with an unparsable stamp instead of dropping real usage, and never
+        invents a "now", which would file an old turn under the current day.
+        """
+        for value in (envelope.get("timestamp"), context.get("started_at")):
+            text = str(value or "").strip()
+            if not text:
+                continue
+            try:
+                moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if moment.tzinfo is None:
+                moment = moment.astimezone()
+            return int(moment.timestamp() * 1000)
+        return 0
+
+    @staticmethod
+    def _codex_provider(session_provider: str, model: str) -> str:
+        """Name the provider bucket a Codex model belongs to.
+
+        Codex records the configured model provider, but a routed install writes
+        a placeholder there. Falling back to the model family keeps unrelated
+        vendors apart and matches the bucket model.dev pricing resolves.
+        """
+        provider = str(session_provider or "").strip().lower()
+        if provider and provider != CODEX_PLACEHOLDER_PROVIDER:
+            return provider
+        return PricingCatalog._canonical_provider(model) or CODEX_PROVIDER_ID
+
     def _workbuddy_cursor_key(self) -> str:
         return "workbuddy_scan_offsets"
 
@@ -1954,6 +2663,7 @@ class Monitor:
             # unreadable source even when this pass produced no rows.
             self.store.set_meta("source_health", json.dumps(self.source_health, ensure_ascii=False))
             self._flush_workbuddy_cursors()
+            self._flush_codex_cursors()
             if full:
                 self.store.set_meta("last_full_reconcile", str(now_ms()))
             if not self._initial_import_done():
@@ -1994,6 +2704,8 @@ class Monitor:
             "timestamp": timestamp,
             "opencode_running": opencode_is_running(),
             "workbuddy_running": workbuddy_is_running(),
+            "dsh_running": dsh_is_running(),
+            "codex_running": codex_is_running(),
             "day": day,
             "today": self.store.summary(day_start, day_end),
             "seven_days": self.store.summary(week_start, timestamp + 1),
@@ -2331,6 +3043,7 @@ def status_text(status: dict[str, Any], maximum: float) -> str:
     running = bool(status.get("opencode_running"))
     workbuddy = bool(status.get("workbuddy_running"))
     dsh = bool(status.get("dsh_running"))
+    codex = bool(status.get("codex_running"))
     last_sync = (
         datetime.fromtimestamp(status["last_sync"] / 1000).astimezone().isoformat(timespec="seconds")
         if status["last_sync"]
@@ -2341,7 +3054,8 @@ def status_text(status: dict[str, Any], maximum: float) -> str:
             f"{APP_NAME} {VERSION}",
             f"OpenCode: {'running' if running else 'stopped'}"
             f" | WorkBuddy: {'running' if workbuddy else 'stopped'}"
-            f" | DSH: {'running' if dsh else 'stopped'}",
+            f" | DSH: {'running' if dsh else 'stopped'}"
+            f" | Codex: {'running' if codex else 'stopped'}",
             f"Today: {format_int(today['total_with_cache'])} tokens",
             f"Cache read: {format_int(today['cache_read_tokens'])}",
             f"Synced: {last_sync}",
@@ -2568,9 +3282,10 @@ def run_tray(config_path: Path) -> int:
         next_sync_at = 0.0
         interval = max(30, safe_int(config["sample_interval_seconds"]))
         logger.info(
-            "Tray worker started (OpenCode running=%s, WorkBuddy running=%s)",
+            "Tray worker started (OpenCode running=%s, WorkBuddy running=%s, Codex running=%s)",
             opencode_is_running(),
             workbuddy_is_running(),
+            codex_is_running(),
         )
         while not stop_event.is_set():
             if not any_source_running():
@@ -2611,6 +3326,7 @@ def run_tray(config_path: Path) -> int:
         print(f"OpenCode: {'运行中' if status['opencode_running'] else '未运行'}")
         print(f"WorkBuddy: {'运行中' if status.get('workbuddy_running') else '未运行'}")
         print(f"DeepSeek Harness: {'运行中' if status.get('dsh_running') else '未运行'}")
+        print(f"Codex: {'运行中' if status.get('codex_running') else '未运行'}")
         print(f"Monitor: {state}")
         print(f"Today: {format_int(today['total_with_cache'])} (cache included)")
         print(f"No cache read: {format_int(today['total_without_cache_read'])}")
@@ -3028,18 +3744,34 @@ class DashboardApi:
         custom_start: str = "",
         custom_end: str = "",
         source: str = "",
+        min_tokens: Any = None,
     ) -> dict[str, Any]:
         config = load_config(Path(self._config_path))
         data_dir = app_data_dir()
         store = Store(data_dir)
         try:
-            options = store.filter_options()
-            model_key: tuple[str, str, str] | None = None
+            rules = ModelRules.from_config(config)
+            # The bounds are needed before the options, because the options are
+            # scoped to the period and source: a dropdown that lists every
+            # provider ever used is the thing this is meant to fix.
+            start_ms, end_ms, granularity = self._period_bounds(period, custom_start, custom_end)
+            threshold = safe_int(min_tokens) if min_tokens is not None else safe_int(config.get("filter_min_tokens"))
+            options = store.filter_options(
+                start_ms,
+                end_ms,
+                source or None,
+                min_tokens=threshold,
+                pinned_provider=provider,
+                pinned_model=model,
+                rules=rules,
+            )
+            # The raw names behind the option are what the query filters on,
+            # so a merged model selects every alias it stands for.
+            model_key: tuple[tuple[str, ...], str] | None = None
             for item in options["models"]:
                 if item["label"] == model:
-                    model_key = (item["provider"], item["model"], item["variant"])
+                    model_key = (tuple(item.get("keys") or [item["model"]]), item["variant"])
                     break
-            start_ms, end_ms, granularity = self._period_bounds(period, custom_start, custom_end)
             event_limit = 100 if view == "events" else 0
             analytics = store.analytics(
                 start_ms,
@@ -3049,6 +3781,7 @@ class DashboardApi:
                 granularity=granularity,
                 event_limit=event_limit,
                 source=source or None,
+                rules=rules,
             )
             pricing_enabled = bool(config.get("use_model_dev_pricing", True))
             selected_pricing_mode = pricing_mode(config)
@@ -3059,7 +3792,9 @@ class DashboardApi:
                 pricing_catalog, pricing_status = catalog.load()
             elif selected_pricing_mode == "custom":
                 pricing_status = {"source": "custom", "state": "enabled", "updated_at": now_ms()}
-            costing_rows = store.costing_rows(start_ms, end_ms, provider or None, model_key, source=source or None)
+            costing_rows = store.costing_rows(
+                start_ms, end_ms, provider or None, model_key, source=source or None, rules=rules
+            )
             attach_model_dev_costs(analytics, costing_rows, pricing_catalog, config)
             pricing_status["enabled"] = pricing_enabled or selected_pricing_mode == "custom"
             pricing_status["mode"] = selected_pricing_mode
@@ -3085,8 +3820,11 @@ class DashboardApi:
                     granularity=previous_granularity,
                     event_limit=0,
                     source=source or None,
+                    rules=rules,
                 )
-                previous_rows = store.costing_rows(previous_start, previous_end, provider or None, model_key, source=source or None)
+                previous_rows = store.costing_rows(
+                    previous_start, previous_end, provider or None, model_key, source=source or None, rules=rules
+                )
                 attach_model_dev_costs(previous, previous_rows, pricing_catalog, config)
                 comparison = {}
                 for key in ("requests", "total_with_cache", "total_cost", "cache_read_tokens"):
@@ -3146,7 +3884,15 @@ class DashboardApi:
                     "workbuddy_root": str(config.get("workbuddy_root", "")),
                     "dsh_running": dsh_is_running(),
                     "dsh_root": str(config.get("dsh_root", "")),
+                    "codex_running": codex_is_running(),
+                    "codex_root": str(config.get("codex_root", "")),
                     "source_health": store.source_health_report(probe_health),
+                    "filter_min_tokens": threshold,
+                    "model_rules": {
+                        "hidden_providers": list(rules.hidden_providers),
+                        "hidden_models": list(rules.hidden_models),
+                        "aliases": [list(item) for item in rules.aliases],
+                    },
                     "last_sync": last_sync,
                     "last_sync_text": datetime.fromtimestamp(last_sync / 1000).astimezone().strftime("%Y-%m-%d %H:%M:%S") if last_sync else "尚未同步",
                     "last_error": store.get_meta("last_error", ""),
@@ -3187,7 +3933,8 @@ class DashboardApi:
         opencode_running = opencode_is_running()
         workbuddy_running = workbuddy_is_running()
         dsh_running = dsh_is_running()
-        if not (opencode_running or workbuddy_running or dsh_running):
+        codex_running = codex_is_running()
+        if not (opencode_running or workbuddy_running or dsh_running or codex_running):
             return {"ok": True, "synced": False, "reason": "idle", "last_sync": 0}
         config = load_config(Path(self._config_path))
         if max_age_seconds is None:
@@ -3216,6 +3963,7 @@ class DashboardApi:
             "opencode_running": opencode_running,
             "workbuddy_running": workbuddy_running,
             "dsh_running": dsh_running,
+            "codex_running": codex_running,
         }
 
     def refresh(self) -> dict[str, Any]:
@@ -3234,6 +3982,7 @@ class DashboardApi:
             "opencode_running": opencode_is_running(),
             "workbuddy_running": workbuddy_is_running(),
             "dsh_running": dsh_is_running(),
+            "codex_running": codex_is_running(),
         }
 
     def set_theme(self, theme: str) -> dict[str, str]:
@@ -3253,12 +4002,66 @@ class DashboardApi:
         save_config(Path(self._config_path), config)
         return {"display_currency": display_currency(config), "usd_cny_rate": usd_cny_rate(config)}
 
+    def set_filter_min_tokens(self, tokens: Any = None) -> dict[str, Any]:
+        """Remember the usage floor that keeps the filter lists short.
+
+        Stored with the rest of the preferences rather than in the window, so
+        the next launch does not present the full unfiltered lists again.
+        """
+        config = load_config(Path(self._config_path))
+        value = 0 if tokens is None or str(tokens) == "" else min(10_000_000_000, safe_int(tokens))
+        config["filter_min_tokens"] = value
+        save_config(Path(self._config_path), config)
+        return {"filter_min_tokens": value}
+
+    def save_model_rules(self, hidden_providers: Any = None, hidden_models: Any = None, aliases: Any = None) -> dict[str, Any]:
+        """Persist which providers and models are hidden or merged.
+
+        Validation runs through the same parser the read path uses, so a stored
+        rule can never be one the matcher would silently ignore.
+        """
+        config = load_config(Path(self._config_path))
+
+        def clean_list(value: Any) -> list[str]:
+            if not isinstance(value, list):
+                return []
+            return [str(item).strip() for item in value if str(item).strip()]
+
+        def clean_aliases(value: Any) -> dict[str, str]:
+            if not isinstance(value, dict):
+                return {}
+            cleaned: dict[str, str] = {}
+            for pattern, target in value.items():
+                source = str(pattern or "").strip()
+                name = str(target or "").strip()
+                if source and name and _rule_matcher(source):
+                    cleaned[source] = name
+            return cleaned
+
+        config["model_rules"] = {
+            "hidden_providers": clean_list(hidden_providers),
+            "hidden_models": clean_list(hidden_models),
+            "aliases": clean_aliases(aliases),
+        }
+        save_config(Path(self._config_path), config)
+        rules = ModelRules.from_config(config)
+        return {
+            "model_rules": {
+                "hidden_providers": list(rules.hidden_providers),
+                "hidden_models": list(rules.hidden_models),
+                "aliases": [list(item) for item in rules.aliases],
+            }
+        }
+
     def get_pricing_settings(self) -> dict[str, Any]:
         config = load_config(Path(self._config_path))
         custom = custom_pricing_config(config)
         store = Store(app_data_dir())
         try:
-            options = store.filter_options()
+            # All time, provider-qualified and unfiltered by the display rules:
+            # a custom price is pinned to one provider and one real model id,
+            # so neither a period nor a merge may narrow this list.
+            options = store.filter_options(qualify_models=True)
         finally:
             store.close()
         return {
@@ -3483,6 +4286,12 @@ def print_status(monitor: Monitor, as_json: bool = False) -> None:
         return
     print(f"{APP_NAME} {VERSION}")
     print(f"Source: {monitor.source_db}")
+    for label, root in (
+        ("WorkBuddy", monitor.workbuddy_root),
+        ("DeepSeek", monitor.dsh_root),
+        ("Codex", monitor.codex_root),
+    ):
+        print(f"{label}: {root or '<not found>'}")
     print(f"Data:   {monitor.data_dir}")
     for label, key in (("Today", "today"), ("7 days", "seven_days"), ("30 days", "thirty_days"), ("Spike window", "spike_window")):
         item = status[key]
@@ -3555,6 +4364,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"database={detect_opencode_db(config)}")
         except Exception as exc:
             print(f"database=<not found: {exc}>")
+        for label, detect in (
+            ("workbuddy_root", detect_workbuddy_root),
+            ("dsh_root", detect_dsh_root),
+            ("codex_root", detect_codex_root),
+        ):
+            root = detect(config)
+            print(f"{label}={root or '<not found>'}")
         print(f"csv={data_dir / 'csv'}")
         return 0
 
