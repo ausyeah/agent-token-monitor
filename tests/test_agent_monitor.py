@@ -105,11 +105,7 @@ class MonitorTests(unittest.TestCase):
             provider_filtered = monitor.store.analytics(day_start, day_end, provider_id="anthropic")
             self.assertEqual(provider_filtered["summary"]["total_with_cache"], 10)
             self.assertEqual(provider_filtered["providers"][0]["name"], "anthropic")
-            # The model option is provider-agnostic, so the model filter can be
-            # used without narrowing by provider first.
-            model_options = monitor.store.filter_options()["models"]
-            self.assertTrue(any(item["label"] == "space-bunny-free · max" for item in model_options))
-            self.assertTrue(all(item["provider"] == "" for item in model_options))
+            self.assertTrue(any(item["label"].startswith("opencode/space-bunny-free") for item in monitor.store.filter_options()["models"]))
 
 
             # Update the V2 source row and a V1 row on the next scan.
@@ -865,348 +861,89 @@ class MonitorTests(unittest.TestCase):
         self.assertIn(module.CODEX_SOURCE, module.SOURCE_ORDER)
         self.assertEqual(module.SOURCE_LABELS[module.CODEX_SOURCE], "Codex")
 
-    # --- filter bar --------------------------------------------------------
+    def test_rankings_show_five_with_paging_arrows(self) -> None:
+        """The provider and model rankings list the top five, then page.
 
-    def seed_usage(self, store, rows, base=1_700_000_000_000):
-        """Insert usage rows as (source, provider, model, variant, tokens, day_offset)."""
-        for source, provider, model, variant, tokens, offset in rows:
-            t = base + offset * 86_400_000
-            store.upsert_event(module.UsageRecord(
-                message_id=f"{source}-{provider}-{model}-{variant}-{offset}",
-                source=source, source_rank=1, session_id="s", project_id="p",
-                project_name="p", project_path="p", provider_id=provider,
-                model_id=model, variant=variant, agent="",
-                event_time=t, source_created=t, source_updated=t,
-                input_tokens=tokens, output_tokens=0, reasoning_tokens=0,
-                cache_read_tokens=0, cache_write_tokens=0, cost=0.0,
-            ))
-        store.conn.commit()
-
-    def test_model_filter_is_independent_of_the_provider_filter(self) -> None:
-        """The same model under two providers is one option and one filter."""
-        with tempfile.TemporaryDirectory() as temp:
-            store = module.Store(Path(temp))
-            try:
-                base = 1_700_000_000_000
-                self.seed_usage(store, [
-                    ("v2", "openai", "gpt-5.6", "high", 1000, 0),
-                    ("codex", "custom", "gpt-5.6", "high", 500, 0),
-                    ("v2", "openai", "other-model", "default", 10, 0),
-                ], base)
-                options = store.filter_options(base, base + 86_400_000)
-                labels = [item["label"] for item in options["models"]]
-                self.assertEqual(labels, ["gpt-5.6 · high", "other-model"])
-                # One entry, and its total spans both providers.
-                entry = next(item for item in options["models"] if item["label"] == "gpt-5.6 · high")
-                self.assertEqual(entry["total"], 1500)
-                self.assertEqual(entry["events"], 2)
-                # Selecting the model must not narrow by provider.
-                analytics = store.analytics(base, base + 86_400_000, model_key=(("gpt-5.6",), "high"))
-                self.assertEqual(analytics["summary"]["requests"], 2)
-                self.assertEqual(analytics["summary"]["total_with_cache"], 1500)
-                # Combining it with a provider filter is an AND, not a reset.
-                narrowed = store.analytics(
-                    base, base + 86_400_000, provider_id="openai", model_key=(("gpt-5.6",), "high")
-                )
-                self.assertEqual(narrowed["summary"]["requests"], 1)
-            finally:
-                store.close()
-
-    def test_filter_options_only_list_the_selected_period(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            store = module.Store(Path(temp))
-            try:
-                base = 1_700_000_000_000
-                self.seed_usage(store, [
-                    ("v2", "openai", "today-model", "default", 1000, 0),
-                    ("v2", "openai", "old-model", "default", 999_000, -40),
-                ], base)
-                today = store.filter_options(base, base + 86_400_000)
-                self.assertEqual([item["name"] for item in today["providers"]], ["openai"])
-                self.assertEqual([item["model"] for item in today["models"]], ["today-model"])
-                # The same call with no window keeps the pricing-dialog behaviour.
-                everything = store.filter_options()
-                self.assertEqual(
-                    sorted(item["model"] for item in everything["models"]),
-                    ["old-model", "today-model"],
-                )
-            finally:
-                store.close()
-
-    def test_filter_options_honour_the_usage_floor_and_pin_the_selection(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            store = module.Store(Path(temp))
-            try:
-                base = 1_700_000_000_000
-                self.seed_usage(store, [
-                    ("v2", "big", "big-model", "default", 10_000_000, 0),
-                    ("v2", "small", "small-model", "default", 50, 0),
-                ], base)
-                options = store.filter_options(base, base + 86_400_000, min_tokens=1000)
-                self.assertEqual([item["name"] for item in options["providers"]], ["big"])
-                self.assertEqual(options["hidden"], {"providers": 1, "models": 1})
-                # A value the user already picked stays listed even under the
-                # floor, otherwise the selection would vanish silently.
-                pinned = store.filter_options(
-                    base, base + 86_400_000, min_tokens=1000, pinned_provider="small"
-                )
-                self.assertEqual([item["name"] for item in pinned["providers"]], ["big", "small"])
-                self.assertEqual(pinned["hidden"], {"providers": 0, "models": 1})
-            finally:
-                store.close()
-
-    def test_model_rules_hide_rows_without_moving_any_total(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            store = module.Store(Path(temp))
-            try:
-                base = 1_700_000_000_000
-                self.seed_usage(store, [
-                    ("v2", "openai", "gpt-5.6", "high", 1000, 0),
-                    ("workbuddy", "workbuddy", "noise-model", "default", 400, 0),
-                ], base)
-                rules = module.ModelRules(hidden_providers=("workbuddy",), hidden_models=("noise-*",))
-                window = (base, base + 86_400_000)
-                plain = store.analytics(*window)
-                ruled = store.analytics(*window, rules=rules)
-                # Hiding is presentation only: the totals must not move.
-                self.assertEqual(plain["summary"]["total_with_cache"], 1400)
-                self.assertEqual(ruled["summary"]["total_with_cache"], 1400)
-                self.assertEqual(plain["trend"][0]["total_with_cache"], ruled["trend"][0]["total_with_cache"])
-                # But the rankings and the log lose the hidden rows.
-                self.assertEqual([row["name"] for row in ruled["providers"]], ["openai"])
-                self.assertEqual([row["model_id"] for row in ruled["models"]], ["gpt-5.6"])
-                logged = store.analytics(*window, event_limit=100, rules=rules)
-                self.assertEqual([row["provider_id"] for row in logged["events"]], ["openai"])
-                # No rules at all is the unchanged default.
-                self.assertEqual([row["name"] for row in plain["providers"]], ["openai", "workbuddy"])
-            finally:
-                store.close()
-
-    def test_model_rules_merge_aliases_into_one_row(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            store = module.Store(Path(temp))
-            try:
-                base = 1_700_000_000_000
-                self.seed_usage(store, [
-                    ("codex", "openai", "gpt-5.6-luna", "max", 1000, 0),
-                    ("codex", "custom", "gpt-5.6-terra", "max", 500, 0),
-                    ("codex", "openai", "gpt-5.6-sol", "max", 250, 0),
-                    ("codex", "openai", "gpt-6-sol", "high", 999, 0),
-                ], base)
-                rules = module.ModelRules(aliases=(("gpt-5.6-*", "gpt-5.6"),))
-                window = (base, base + 86_400_000)
-                plain = store.analytics(*window)
-                merged = store.analytics(*window, rules=rules)
-                self.assertEqual(len(plain["models"]), 4)
-                # Merging is per provider, so two vendors stay apart while each
-                # vendor's own aliases collapse into a single row.
-                self.assertEqual(len(merged["models"]), 3)
-                row = next(r for r in merged["models"] if r["name"] == "openai/gpt-5.6 · max")
-                self.assertEqual(row["requests"], 2)
-                self.assertEqual(row["total_with_cache"], 1250)
-                other = next(r for r in merged["models"] if r["name"] == "custom/gpt-5.6 · max")
-                self.assertEqual(other["total_with_cache"], 500)
-                # Nothing was dropped: the total is identical either way.
-                self.assertEqual(merged["summary"]["total_with_cache"], plain["summary"]["total_with_cache"])
-                # The merged name is also what pricing looks up.
-                rows = store.costing_rows(*window, rules=rules)
-                self.assertEqual(sorted({row["model_id"] for row in rows}), ["gpt-5.6", "gpt-6-sol"])
-                # And the dropdown offers one entry per model, not per alias.
-                options = store.filter_options(*window, rules=rules)
-                labels = [item["label"] for item in options["models"]]
-                self.assertEqual(sorted(labels), ["gpt-5.6 · max", "gpt-6-sol · high"])
-                # Filtering on the merged name must still select every alias:
-                # the stored rows were never renamed.
-                merged_option = next(i for i in options["models"] if i["label"] == "gpt-5.6 · max")
-                self.assertEqual(sorted(merged_option["keys"]),
-                                 ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"])
-                selected = store.analytics(
-                    *window, model_key=(tuple(merged_option["keys"]), merged_option["variant"])
-                )
-                self.assertEqual(selected["summary"]["requests"], 3)
-                self.assertEqual(selected["summary"]["total_with_cache"], 1750)
-            finally:
-                store.close()
-
-    def test_model_rule_patterns_are_glob_or_substring(self) -> None:
-        rules = module.ModelRules(
-            hidden_providers=("WorkBuddy",),
-            hidden_models=("*-flash",),
-            aliases=(("gpt-5.6-*", "gpt-5.6"),),
-        )
-        self.assertTrue(rules.provider_hidden("workbuddy"))
-        self.assertFalse(rules.provider_hidden("openai"))
-        self.assertTrue(rules.model_hidden("deepseek-v4-flash"))
-        self.assertFalse(rules.model_hidden("deepseek-v4-pro"))
-        self.assertEqual(rules.model_name("gpt-5.6-luna"), "gpt-5.6")
-        self.assertEqual(rules.model_name("gpt-6-sol"), "gpt-6-sol")
-        # An empty pattern must never match everything.
-        self.assertFalse(module.ModelRules(hidden_providers=("",)).provider_hidden("openai"))
-
-    def test_model_rules_round_trip_through_the_config(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            config_path = root / "config.json"
-            config_path.write_text("{}", encoding="utf-8")
-            original_config = module.app_data_dir
-            module.app_data_dir = lambda: root
-            try:
-                api = module.DashboardApi(config_path)
-                saved = api.save_model_rules(["workbuddy"], ["*-preview"], {"gpt-5.6-*": "gpt-5.6"})
-                self.assertEqual(saved["model_rules"]["hidden_providers"], ["workbuddy"])
-                self.assertEqual(saved["model_rules"]["aliases"], [["gpt-5.6-*", "gpt-5.6"]])
-                # Blank patterns and a blank rename target are dropped, not stored.
-                api.save_model_rules(["", "  "], [""], {"gpt-5.6-*": "", "keep": "x"})
-                stored = module.ModelRules.from_config(module.load_config(config_path))
-                self.assertEqual(stored.hidden_providers, ())
-                self.assertEqual(stored.hidden_models, ())
-                self.assertEqual(stored.aliases, (("keep", "x"),))
-                self.assertEqual(api.set_filter_min_tokens(250_000)["filter_min_tokens"], 250_000)
-                # A negative or nonsensical floor clamps to zero, never below.
-                self.assertEqual(api.set_filter_min_tokens(-5)["filter_min_tokens"], 0)
-                self.assertEqual(api.set_filter_min_tokens("abc")["filter_min_tokens"], 0)
-            finally:
-                module.app_data_dir = original_config
-
-    def test_pricing_model_list_keeps_the_provider_and_ignores_the_rules(self) -> None:
-        """A custom price is pinned to one provider and one real model id."""
-        with tempfile.TemporaryDirectory() as temp:
-            store = module.Store(Path(temp))
-            try:
-                base = 1_700_000_000_000
-                self.seed_usage(store, [
-                    ("openai", "openai", "gpt-5.6-luna", "max", 1000, 0),
-                    ("codex", "custom", "gpt-5.6-luna", "max", 500, 0),
-                ], base)
-                # This is the call get_pricing_settings makes: qualified models,
-                # all time, and no display rules.
-                options = store.filter_options(qualify_models=True)
-                labels = sorted(item["label"] for item in options["models"])
-                self.assertEqual(labels, ["custom/gpt-5.6-luna · max", "openai/gpt-5.6-luna · max"])
-                self.assertTrue(all(item["provider"] for item in options["models"]))
-                # Rules only reach the filter bar, and there they replace the
-                # alias with the merged name while keeping the raw names as the
-                # key a filter is applied on.
-                ruled = store.filter_options(rules=module.ModelRules(aliases=(("gpt-5.6-*", "gpt-5.6"),)))
-                entry = ruled["models"][0]
-                self.assertEqual(entry["label"], "gpt-5.6 · max")
-                self.assertEqual(sorted(entry["keys"]), ["gpt-5.6-luna"])
-            finally:
-                store.close()
-
-    def test_filter_bar_shows_usage_and_keeps_the_model_independent(self) -> None:
-        """The dropdowns must be scannable by size, and never drop a selection."""
-        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
-        # Option text carries the usage, the option value stays a stable key.
-        self.assertIn("function paintFilter(which) {", html)
-        self.assertIn("${item.value ?? item.name} · ${compactFmt(item.total || 0)}", html)
-        self.assertIn("${item.label} · ${compactFmt(item.total || 0)}", html)
-        self.assertNotIn("function fillSelect(select, values, selected)", html)
-        self.assertNotIn("function fillSelectPairs(", html)
-        # Picking a model must not also narrow the provider.
-        self.assertIn(
-            '$("#model-filter").addEventListener("change",e=>{state.model=e.target.value||"";loadView();});',
-            html,
-        )
-        self.assertNotIn("if(option)state.provider=option.provider;", html)
-        # The usage floor and the rules dialog both exist and are wired up.
-        self.assertIn('id="threshold-button"', html)
-        self.assertIn('id="rules-button"', html)
-        self.assertIn('id="rules-modal"', html)
-        self.assertIn('callApi("set_filter_min_tokens", value)', html)
-        self.assertIn('callApi("save_model_rules"', html)
-        self.assertIn("state.minTokens)", html)
-        # The period row must not stretch into a band of empty gaps again.
-        self.assertIn(".control-bar .segmented { flex: 0 0 auto;", html)
-        self.assertNotIn(".control-bar .segmented { flex: 1 1 100%; width: 100%; }", html)
-        # A squeezed field must not wrap its own label onto two lines.
-        self.assertIn("white-space: nowrap; flex: 0 0 auto;", html)
-
-    def test_trend_curve_is_smooth_without_inventing_peaks(self) -> None:
-        """The trend must read as a curve, not a zigzag.
-
-        Smoothing is done by interpolating the stroke, never by averaging the
-        data, so the numbers on the axis and in the tooltip stay exactly what
-        was recorded. A monotone spline is required rather than Catmull-Rom or
-        a plain Bezier, because only the monotone variant is guaranteed not to
-        bulge past a local peak and report usage that never happened.
+        A page turn repaints from the rows already in memory, so it never
+        re-queries. The bar scale deliberately comes from the whole list rather
+        than the visible page, otherwise the last page would show its smallest
+        entry as a full bar.
         """
         html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
-        self.assertIn("function smoothPath(points) {", html)
-        self.assertIn("const line = smoothPath(points);", html)
-        # The straight-segment builder is what made the series look jagged.
-        self.assertNotIn('`${i?"L":"M"}', html)
-        # The two properties that make the curve safe: a sign change pins the
-        # tangent flat, and the harmonic mean keeps the interval monotone.
-        self.assertIn("if (slope[i - 1] * slope[i] <= 0) { tangent[i] = 0; continue; }", html)
-        self.assertIn("tangent[i] = (w1 + w2) / (w1 / slope[i - 1] + w2 / slope[i]);", html)
-        # Fewer points than the path builder, so the two edge cases are paths.
-        self.assertIn("if (n === 1) return `M${at(points[0])}`;", html)
-        self.assertIn("if (n === 2) return `M${at(points[0])} L${at(points[1])}`;", html)
-        # Dots thin out as the series gets dense instead of crowding the curve.
-        self.assertIn("const dotLimit = state.compact ? 18 : 30;", html)
-
-    def test_filter_lists_page_five_at_a_time(self) -> None:
-        """Only the top five show; the arrows reach the rest.
-
-        Paging is a display concern, so the whole list still travels in the
-        response and turning a page never costs another query. A live selection
-        outranks the page number, otherwise a chosen value could sit on a page
-        the user is not looking at and read as unselected.
-        """
-        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
-        self.assertIn("const FILTER_PAGE_SIZE = 5;", html)
+        self.assertIn("const RANK_PAGE_SIZE = 5;", html)
         for which in ("provider", "model"):
-            self.assertIn(f'id="{which}-prev"', html)
-            self.assertIn(f'id="{which}-next"', html)
-            self.assertIn(f'id="{which}-page"', html)
-        self.assertIn('page:"providerPage"', html)
-        self.assertIn('page:"modelPage"', html)
-        self.assertIn("Math.ceil(items.length / FILTER_PAGE_SIZE)", html)
-        # The page is derived from the selection first, then the remembered page,
-        # and always clamped into range.
+            self.assertIn(f'data-rank="{which}"', html)
+            self.assertIn(f'data-rank-page="{which}"', html)
+        self.assertEqual(html.count('data-rank-step="-1"'), 2)
+        self.assertEqual(html.count('data-rank-step="1"'), 2)
+        # Scaled over every row, not over the page.
+        self.assertIn("Math.max(1, ...rows.map(r => Number(r.total_with_cache || 0)))", html)
+        self.assertNotIn("Math.max(1, ...top.map(r => Number(r.total_with_cache || 0)))", html)
+        # The page is always clamped into range.
+        self.assertIn("Math.max(0, Math.min(Number(state.rankPage?.[rank] ?? 0) || 0, pages - 1))", html)
+        # A turn repaints without going back to the backend.
+        self.assertIn("if(state.data)renderCurrent();", html)
+        self.assertIn("$$(\"[data-rank-step]\").forEach", html)
+        # Changing what is listed starts back at the first page.
+        for handler in (
+            'state.period=button.dataset.period;state.rankPage={provider:0,model:0};',
+            'state.rankPage={provider:0,model:0};$("#model-filter").value="全部模型";',
+            'state.rankPage={provider:0,model:0};$("#provider-filter").value=state.provider||"全部供应商";',
+            'state.rankPage={provider:0,model:0};$("#provider-filter").value="全部供应商";',
+            'state.rankPage={provider:0,model:0};$("#provider-filter").value="全部供应商";$("#model-filter").value="全部模型";$("#source-filter").value="";',
+        ):
+            self.assertIn(handler, html)
+
+    def test_model_filter_still_selects_usage(self) -> None:
+        """Filtering by model is the feature the ranking paging must not cost.
+
+        The model dropdown resolves its label back to a provider, model and
+        variant on the backend, and the model filter is the only control that
+        narrows the figures down to one model.
+        """
+        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+        self.assertIn('id="model-filter"', html)
         self.assertIn(
-            "let page = index >= 0 ? Math.floor(index / FILTER_PAGE_SIZE) : (Number(state[cfg.page]) || 0);",
+            '$("#model-filter").addEventListener("change",e=>{state.model=e.target.value==="全部模型"?"":e.target.value;',
             html,
         )
-        self.assertIn("page = Math.max(0, Math.min(page, pages - 1));", html)
-        self.assertIn("if (prev) prev.disabled = !many || page === 0;", html)
-        self.assertIn("if (next) next.disabled = !many || page === pages - 1;", html)
-        # Paging must not drop the selection out of the select's value.
-        self.assertIn('select.value = index >= 0 ? state[cfg.selected] : "";', html)
-        # The list is rebuilt from different rows whenever the period, source,
-        # threshold or rules change, so paging restarts at the top entries then.
-        # Narrowing by provider also clears the model, so its page goes with it.
-        self.assertIn("state.period=button.dataset.period;resetFilterPages();", html)
-        self.assertIn("state.source=e.target.value||\"\";state.provider=\"\";state.model=\"\";resetFilterPages();", html)
-        self.assertIn("state.provider=\"\";state.model=\"\";state.source=\"\";resetFilterPages();", html)
-        self.assertIn("state.minTokens = value;\n        resetFilterPages();", html)
-        self.assertIn("state.modelRules=result.model_rules;resetFilterPages();", html)
-        self.assertIn('state.model="";state.modelPage=0;$("#model-filter").value="";', html)
-        self.assertIn("const resetFilterPages = () => { state.providerPage = 0; state.modelPage = 0; };", html)
-        # The two pagers are driven independently.
-        self.assertIn('turnFilterPage("provider",-1)', html)
-        self.assertIn('turnFilterPage("model",1)', html)
-
-    def test_dashboard_lock_is_versioned_and_never_fails_silently(self) -> None:
-        """An older build must not be able to lock out the upgraded one.
-
-        close_stale_dashboards removes the old window but cannot stop the old
-        process, which keeps holding the lock for as long as it lives. With a
-        shared name the new build found no window to restore, deferred to a lock
-        it could never take, and returned success without ever opening anything.
-        """
-        self.assertIn(module.VERSION, module.DASHBOARD_MUTEX_NAME)
-        self.assertIn("AgentTokenMonitor", module.DASHBOARD_MUTEX_NAME)
-        source = (Path(module.__file__).parent / "agent_token_monitor.py").read_text(encoding="utf-8")
-        # The window title is matched exactly, so the lock has to be scoped the
-        # same way or the two can disagree about who owns the Dashboard.
-        self.assertIn('f"{APP_NAME} {VERSION}"', source)
-        # Deferring with no window to restore must tell the user, not exit 0
-        # quietly.
-        self.assertIn("no window to restore", source)
-        self.assertIn("_report_startup_failure(", source)
-        self.assertNotIn('logger.info("Another Dashboard instance holds the lock; deferring to it")', source)
+        self.assertIn(
+            "const data=await callApi(\"get_dashboard\",state.period,state.provider,state.model,",
+            html,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            store = module.Store(Path(temp))
+            try:
+                t = 1_700_000_000_000
+                for message_id, provider, model, tokens in (
+                    ("a", "openai", "gpt-x", 1000),
+                    ("b", "openai", "other", 500),
+                    ("c", "custom", "gpt-x", 250),
+                ):
+                    store.upsert_event(module.UsageRecord(
+                        message_id=message_id, source="v2", source_rank=2, session_id="s",
+                        project_id="p", project_name="p", project_path="p", provider_id=provider,
+                        model_id=model, variant="max", agent="", event_time=t,
+                        source_created=t, source_updated=t, input_tokens=tokens,
+                        output_tokens=0, reasoning_tokens=0, cache_read_tokens=0,
+                        cache_write_tokens=0, cost=0.0,
+                    ))
+                store.conn.commit()
+                # The label is the identity the frontend sends back.
+                labels = [item["label"] for item in store.filter_options()["models"]]
+                self.assertIn("openai/gpt-x · max", labels)
+                # Selecting it narrows the figures to that provider's model.
+                key = next(
+                    (item["provider"], item["model"], item["variant"])
+                    for item in store.filter_options()["models"]
+                    if item["label"] == "openai/gpt-x · max"
+                )
+                picked = store.analytics(t - 1000, t + 1000, model_key=key)
+                self.assertEqual(picked["summary"]["requests"], 1)
+                self.assertEqual(picked["summary"]["total_with_cache"], 1000)
+                self.assertEqual(store.analytics(t - 1000, t + 1000)["summary"]["requests"], 3)
+            finally:
+                store.close()
 
     def test_source_filter_is_additive_and_selective(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1218,7 +955,6 @@ class MonitorTests(unittest.TestCase):
                     ("v1-a", "v1", "anthropic"),
                     ("workbuddy-a", "workbuddy", "workbuddy"),
                     ("dsh-a", "dsh", "bupt"),
-                    ("codex-a", "codex", "openai"),
                 ):
                     store.upsert_event(module.UsageRecord(
                         message_id=message_id, source=source, source_rank=1,
@@ -1230,19 +966,17 @@ class MonitorTests(unittest.TestCase):
                     ))
                 store.conn.commit()
                 # An empty selection must not narrow anything.
-                self.assertEqual(store.analytics(t - 1000, t + 1000)["summary"]["requests"], 5)
-                self.assertEqual(len(store.costing_rows(t - 1000, t + 1000)), 5)
+                self.assertEqual(store.analytics(t - 1000, t + 1000)["summary"]["requests"], 4)
+                self.assertEqual(len(store.costing_rows(t - 1000, t + 1000)), 4)
                 # "opencode" covers both the v1 and v2 database layouts.
                 self.assertEqual(store.analytics(t - 1000, t + 1000, source="opencode")["summary"]["requests"], 2)
                 self.assertEqual(store.analytics(t - 1000, t + 1000, source="workbuddy")["summary"]["requests"], 1)
                 self.assertEqual(store.analytics(t - 1000, t + 1000, source="dsh")["summary"]["requests"], 1)
-                self.assertEqual(store.analytics(t - 1000, t + 1000, source="codex")["summary"]["requests"], 1)
                 self.assertEqual(store.source_clause("")[0], "")
                 values = {item["value"]: item["events"] for item in store.source_options()}
                 self.assertEqual(values["opencode"], 2)
                 self.assertEqual(values["workbuddy"], 1)
                 self.assertEqual(values["dsh"], 1)
-                self.assertEqual(values["codex"], 1)
             finally:
                 store.close()
 
@@ -1423,6 +1157,22 @@ class MonitorTests(unittest.TestCase):
         self.assertIn('<div class="eyebrow">Agent Token Monitor</div>', html)
         self.assertNotIn("OpenCode Token Monitor", html)
         self.assertNotIn("opencode_token_monitor", html)
+
+    def test_dashboard_lock_is_versioned_and_never_fails_silently(self) -> None:
+        """An older build must not be able to lock out the upgraded one.
+
+        close_stale_dashboards removes the old window but cannot stop its
+        process, which keeps holding the lock for as long as it lives. With a
+        shared name the new build found no window to restore, deferred to a lock
+        it could never take, and returned success without ever opening anything.
+        """
+        self.assertIn(module.VERSION, module.DASHBOARD_MUTEX_NAME)
+        self.assertIn("AgentTokenMonitor", module.DASHBOARD_MUTEX_NAME)
+        source = (Path(module.__file__).parent / "agent_token_monitor.py").read_text(encoding="utf-8")
+        # Deferring with no window to restore must tell the user, not exit 0
+        # quietly.
+        self.assertIn("no window to restore", source)
+        self.assertNotIn('logger.info("Another Dashboard instance holds the lock; deferring to it")', source)
 
     def test_dashboard_has_a_dedicated_single_instance_lock(self) -> None:
         self.assertTrue(module.DASHBOARD_MUTEX_NAME)

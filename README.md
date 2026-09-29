@@ -22,11 +22,10 @@
 | **OpenCode** | `~/.local/share/opencode/opencode.db` | 供应商事件中的 token 字段 |
 | **WorkBuddy** | `~/.workbuddy/projects/**/*.jsonl` | `providerData.rawUsage` 原始计数器 |
 | **DeepSeek Harness** | `~/.dsh/sessions/**/*.jsonl.zstd` | `assistant/message` 的 `usage` |
-| **Codex** | `~/.codex/sessions/**/rollout-*.jsonl` | `token_count` 的累计计数器逐次做差 |
 
-Dashboard 顶部的「来源」下拉可在这四者之间切换；只有一个来源时该控件自动隐藏。
+Dashboard 顶部的「来源」下拉可在这三者之间切换；只有一个来源时该控件自动隐藏。
 
-> WorkBuddy 用积分（Credit）计费且无法换算成 Token 比例，DeepSeek Harness 不记录缓存命中与成本，Codex 只记录 Token 累计值而不记录账单成本。本工具只呈现各 Agent 真实记录的字段，不做任何推算。
+> WorkBuddy 用积分（Credit）计费且无法换算成 Token 比例，DeepSeek Harness 不记录缓存命中与成本。本工具只呈现各 Agent 真实记录的字段，不做任何推算。
 
 ## 为什么做这个工具？
 
@@ -48,20 +47,14 @@ WorkBuddy 用积分（Credit）计费，同一模型下不同任务的 Credit / 
 
 DeepSeek Harness 的会话日志是 zstd 压缩且会被原地重写，所以不使用字节偏移游标，而是每次解压后按 `会话 id + 事件序号` 幂等入库。
 
-Codex 的 `info.total_token_usage` 是整个会话的累计值，每条记录存的是它与上一条之间的差值。Codex 在某一轮没有产生新推理时会重复发出累计值不变的事件，这类事件不推进计数，直接跳过。因此同一个会话被续写或分叉时会存在多个 rollout 文件，它们各自重置行号，去重按**文件 + 行号**进行，两个文件的用量都会计入。
-
-> Codex 的 `cached_input_tokens` 与 `cache_write_input_tokens` 是 `input_tokens` 中互不相交的两部分，`reasoning_output_tokens` 是 `output_tokens` 的一部分，`total_tokens` 恰好等于 `input_tokens + output_tokens`。因此扣减之后五类 Token 互不重叠，Dashboard 的「含缓存命中」总量与 Codex 自己记的 `total_tokens` 完全一致。
-> Codex 记录的 `model_provider` 在中转部署下是占位值 `custom`，此时供应商一栏改用模型族名（`gpt-*` → `openai`、`step-*` → `stepfun`），与 model.dev 的计价桶保持一致，避免不同厂商被并进同一行。
-
-| 项目 | WorkBuddy | DeepSeek Harness | Codex |
-| --- | --- | --- | --- |
-| 输入 Token | `prompt_cache_miss_tokens`（不含已缓存前缀） | `inputTokens` | `input_tokens` 减去缓存与缓存写入 |
-| 缓存命中 | `prompt_cache_hit_tokens` | 无此字段，记为 0 | `cached_input_tokens` |
-| 缓存写入 | 无独立字段 | 无此字段，记为 0 | `cache_write_input_tokens` |
-| 输出 Token | `completion_tokens - completion_thinking_tokens` | `outputTokens` | `output_tokens - reasoning_output_tokens` |
-| 推理 Token | `completion_thinking_tokens`（输出的子集，拆分为互斥两项） | 无独立字段，不拆分 | `reasoning_output_tokens`（输出的子集，拆分为互斥两项） |
-| 成本 | Credit 不折算金额 | 无成本字段 | 无成本字段 |
-| 供应商 / 模型 | `providerData.requestModelId` | 每次请求的 `finish.replayState.response` 路由，优先于会话级设置 | `turn_context` 的 `model` 与 `effort`，会话开始及每次切换模型时写入 |
+| 项目 | WorkBuddy | DeepSeek Harness |
+| --- | --- | --- |
+| 输入 Token | `prompt_cache_miss_tokens`（不含已缓存前缀） | `inputTokens` |
+| 缓存命中 | `prompt_cache_hit_tokens` | 无此字段，记为 0 |
+| 输出 Token | `completion_tokens - completion_thinking_tokens` | `outputTokens` |
+| 推理 Token | `completion_thinking_tokens`（输出的子集，拆分为互斥两项） | 无独立字段，不拆分 |
+| 成本 | Credit 不折算金额 | 无成本字段 |
+| 供应商 / 模型 | `providerData.requestModelId` | 每次请求的 `finish.replayState.response` 路由，优先于会话级设置 |
 
 > DeepSeek Harness 的会话日志是 zstd 压缩且会被原地重写，因此不使用字节偏移游标，而是每次解压后按 `会话 id + 事件序号` 幂等入库，重复同步不会产生重复记录。缺少 `zstandard` 依赖时会在界面上明确提示，而不是静默显示为零。
 
@@ -74,21 +67,6 @@ Codex 的 `info.total_token_usage` 是整个会话的累计值，每条记录存
 - Token 构成使用多色堆叠条：输入、输出、推理、缓存命中一眼可区分
 - 悬停查看每一类的数量与占比，图例同步显示数值
 - 账单成本、参考估算、采用成本、未定价状态分开显示，绝不把估算伪装成账单
-
-### 筛选可以调，也能删
-
-- 供应商、模型、来源三个筛选互相独立
-- **模型筛选不依赖供应商**：同一个模型在不同供应商下只出现一个选项，选中它不会顺带把供应商也收窄
-- **下拉列表按所选周期和来源收敛**，只列出该区间内真正产生过用量的条目，按用量从大到小排序，每个选项直接带用量
-- **用量门槛**（控制栏「门槛」按钮）可隐藏列表末尾的噪声条目。它**只影响列表长度，不改变任何总量**；被隐藏的数量会在弹窗里写明，不会把一份短列表当作全部
-- **模型规则**（控制栏「模型规则」按钮）：
-
-| 规则 | 效果 | 是否影响总量 |
-| --- | --- | --- |
-| 隐藏供应商 / 模型 | 不出现在筛选列表、排行和请求日志里 | 否，用量照常计入 |
-| 合并模型别名 | 同一模型的多个名字累加成一行，归并名同时用于查询 model.dev 价格 | 否，总量不变 |
-
-  匹配忽略大小写；含 `*` 或 `?` 按通配符匹配，否则按子串匹配。规则在**读取时**生效，数据库里始终是各 Agent 真实记录的值，删掉规则即可完全恢复。
 
 ### 适合免费计划的长期观察
 
@@ -260,11 +238,9 @@ AgentTokenMonitor.exe uninstall
 %USERPROFILE%\\.local\\share\\opencode\\opencode.db
 %USERPROFILE%\\.workbuddy\\projects\\**\\*.jsonl
 %USERPROFILE%\\.dsh\\sessions\\**\\session.v*.jsonl.zstd
-%CODEX_HOME%\\sessions\\**\\rollout-*.jsonl
-%CODEX_HOME%\\archived_sessions\\rollout-*.jsonl
 ```
 
-程序会先检测 `OpenCode.exe`、`opencode.exe`、`opencode-cli.exe`、`WorkBuddy.exe`、`DeepSeek Harness.exe` 或 `Codex.exe` 是否运行。只要没有任何一个在运行，就不会查询任何源数据，也不会调用 CLI 去探测路径。
+程序会先检测 `OpenCode.exe`、`opencode.exe`、`opencode-cli.exe`、`WorkBuddy.exe` 或 `DeepSeek Harness.exe` 是否运行。只要没有任何一个在运行，就不会查询任何源数据，也不会调用 CLI 去探测路径。
 
 配置项：
 
@@ -274,16 +250,8 @@ AgentTokenMonitor.exe uninstall
 | `workbuddy_root` | 自动探测 | WorkBuddy 数据目录，留空则自动查找 `~/.workbuddy` |
 | `dsh_enabled` | `true` | 是否读取 DeepSeek Harness 本地数据 |
 | `dsh_root` | 自动探测 | DeepSeek Harness 数据目录，留空则自动查找 `~/.dsh` |
-| `codex_enabled` | `true` | 是否读取 Codex 本地数据 |
-| `codex_root` | 自动探测 | Codex 主目录，留空则依次查找 `CODEX_HOME`、`~/.codex`、`%APPDATA%\\codex` |
-| `filter_min_tokens` | `0` | 筛选列表的用量门槛，低于该值的供应商 / 模型不列出 |
-| `model_rules.hidden_providers` | `[]` | 隐藏的供应商名列表 |
-| `model_rules.hidden_models` | `[]` | 隐藏的模型名列表 |
-| `model_rules.aliases` | `{}` | 模型别名归并，如 `{"gpt-5.6-*": "gpt-5.6"}` |
 
 WorkBuddy 的 JSONL 为追加写入，本工具按文件大小维护增量游标，只读取新增部分；文件被截断或改写时会自动从头重读。游标与用量事件在同一事务内提交，重复同步不会产生重复记录。
-
-Codex 的 rollout 同样是追加写入，因此也按文件大小维护增量游标。但累计计数器必须跨次保留，否则游标之后的第一条事件会被记成整个会话的总量，所以游标里同时保存了上一次的累计值和会话上下文（模型、effort、cwd、originator）。归档只是把文件从 `sessions` 移到 `archived_sessions`，两处都读取；被轮转成 `.jsonl.bak-*` 的旧副本不计入。
 
 ### Dashboard 自动更新
 
@@ -348,9 +316,6 @@ python -m unittest discover -s tests -q
 - OpenCode V1 / V2 数据库读取
 - WorkBuddy JSONL 读取、缓存拆分与推理 Token 拆分
 - DeepSeek Harness zstd 会话日志读取与逐请求路由解析
-- Codex rollout 读取、累计值做差、重复事件跳过、按文件去重与增量追加
-- 模型筛选与供应商筛选相互独立；筛选列表按时段收敛、按用量排序、支持门槛且已选项不丢失
-- 模型规则的隐藏不影响总量、别名归并后总量不变且仍可按归并名过滤
 - 增量同步与去重
 - 来源筛选的增量语义（空值不收窄，`opencode` 覆盖 v1/v2）
 - Token 统计和 CSV

@@ -22,12 +22,6 @@
   "pricing_multiplier": 1.0,
   "display_currency": "USD",
   "usd_cny_rate": 7.20,
-  "filter_min_tokens": 0,
-  "model_rules": {
-    "hidden_providers": [],
-    "hidden_models": [],
-    "aliases": {}
-  },
   "custom_pricing": {
     "default": {},
     "models": []

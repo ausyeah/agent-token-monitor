@@ -101,17 +101,14 @@
        clipped, at any width, and must not be hidden behind an invisible
        scroll area. */
     .control-bar {
-      display: flex; flex-wrap: wrap; align-items: center; gap: 12px 14px; padding: 12px 14px; margin-bottom: 14px; min-width: 0;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 10px; margin-bottom: 14px; min-width: 0;
       background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
     }
-    /* The period selector owns a full row but keeps its natural width. Letting
-       it stretch used to smear the seven buttons across the whole window,
-       which read as a band of empty gaps rather than as one control. */
-    .control-bar .segmented { flex: 0 0 auto; max-width: 100%; }
+    /* The period selector is the primary control and always owns a full row. */
+    .control-bar .segmented { flex: 1 1 100%; width: 100%; }
     .control-bar .custom-range { flex: 1 1 100%; }
-    /* Filters share leftover space on a wide window and stack when narrow, with
-       a ceiling so one dropdown cannot swallow the whole row. */
-    .control-bar .filter-field { flex: 1 1 170px; min-width: 0; max-width: 300px; }
+    /* Filters share leftover space on a wide window and stack when narrow. */
+    .control-bar .filter-field { flex: 1 1 165px; min-width: 0; }
     .control-bar .filter-field select { width: 100%; min-width: 0; }
     .custom-range { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; color: var(--muted); }
     .custom-range[hidden] { display: none; }
@@ -128,9 +125,7 @@
     .period-button.active { background: var(--accent); color: var(--accent-ink); font-weight: 700; box-shadow: 0 5px 16px rgba(0,0,0,.12); }
     .control-divider { width: 1px; height: 26px; background: var(--border); flex: 0 0 auto; }
     .filter-field { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
-    /* A squeezed field used to wrap "供应商" onto two lines, which pushed the
-       select out of alignment with its neighbours. */
-    .filter-field label { color: var(--muted); font-size: 12px; white-space: nowrap; flex: 0 0 auto; }
+    .filter-field label { color: var(--muted); font-size: 12px; }
     select {
       appearance: none; min-width: 150px; height: 38px; padding: 0 34px 0 12px; color: var(--text-soft);
       background: var(--surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238f8b84' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 11px center;
@@ -153,59 +148,6 @@
     .quick-button:hover { color: var(--text); border-color: var(--accent); }
     .active-filter-summary { display: block; margin: -3px 0 10px; padding: 5px 10px; color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--warning) 22%, var(--border)); border-radius: 999px; font-size: 10px; cursor: pointer; }
     .active-filter-summary[hidden] { display: none; }
-    /* Additive: the usage floor that keeps the dropdowns short, and the
-       hide/merge rules. Both are display preferences, never a data filter. */
-    .select-pager { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1 1 auto; }
-    .page-arrow {
-      flex: 0 0 auto; width: 24px; height: 38px; padding: 0; color: var(--text-soft);
-      background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px;
-      font-size: 15px; line-height: 1; cursor: pointer;
-    }
-    .page-arrow:hover:not(:disabled) { color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
-    .page-arrow:disabled { opacity: .3; cursor: default; }
-    .page-count { flex: 0 0 auto; min-width: 32px; color: var(--muted); font-size: 10px; text-align: center; }
-    .page-count[hidden] { display: none; }
-    .filter-tools { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
-    .threshold-button { white-space: nowrap; }
-    .threshold-button[data-active="1"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
-    .threshold-wrap { position: relative; flex: 0 0 auto; }
-    .threshold-popover {
-      position: absolute; z-index: 60; top: calc(100% + 8px); left: 0; width: 268px; padding: 12px;
-      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-      box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 10px;
-    }
-    .threshold-popover[hidden] { display: none; }
-    .popover-title { color: var(--muted); font-size: 11px; line-height: 1.5; }
-    .threshold-presets { display: flex; flex-wrap: wrap; gap: 6px; }
-    .threshold-preset {
-      padding: 5px 10px; color: var(--text-soft); background: var(--surface-2);
-      border: 1px solid var(--border); border-radius: 999px; font-size: 11px; cursor: pointer;
-    }
-    .threshold-preset.active { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); font-weight: 700; }
-    .threshold-custom { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
-    .threshold-custom input {
-      flex: 1 1 auto; min-width: 0; height: 32px; padding: 0 9px; color: var(--text-soft);
-      background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; color-scheme: dark;
-    }
-    html[data-theme="light"] .threshold-custom input { color-scheme: light; }
-    .rule-row { display: flex; align-items: center; gap: 8px; }
-    .rule-row input {
-      flex: 1 1 0; min-width: 0; height: 34px; padding: 0 9px; color: var(--text-soft);
-      background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px;
-    }
-    .rule-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
-    .rule-list:empty { display: none; }
-    .rule-chip {
-      display: flex; align-items: center; gap: 8px; padding: 5px 8px 5px 10px;
-      background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; font-size: 11px;
-    }
-    .rule-chip span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .rule-chip button {
-      flex: 0 0 auto; width: 20px; height: 20px; line-height: 1; color: var(--muted);
-      background: transparent; border: 0; border-radius: 50%; cursor: pointer;
-    }
-    .rule-chip button:hover { color: var(--danger); }
-    .rule-arrow { color: var(--muted); flex: 0 0 auto; }
     /* Additive: surfaces a source that is configured but unreadable, so a
        schema change never looks like "no usage". */
     .source-warning { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 10px; padding: 8px 11px; color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, var(--surface)); border: 1px solid color-mix(in srgb, var(--danger) 26%, var(--border)); border-radius: 10px; font-size: 11px; line-height: 1.5; }
@@ -301,6 +243,16 @@
     .rank-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-soft); }
     .rank-track { height: 7px; background: var(--surface-3); border-radius: 99px; overflow: hidden; }
     .rank-fill { height: 100%; background: var(--accent); border-radius: inherit; }
+    /* Additive: the ranking shows the top five and the arrows reach the rest. */
+    .rank-pager { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+    .rank-arrow {
+      width: 24px; height: 26px; padding: 0; color: var(--text-soft); background: var(--surface-2);
+      border: 1px solid var(--border); border-radius: 8px; font-size: 14px; line-height: 1; cursor: pointer;
+    }
+    .rank-arrow:hover:not(:disabled) { color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+    .rank-arrow:disabled { opacity: .3; cursor: default; }
+    .rank-page { min-width: 30px; color: var(--muted); font-size: 10px; text-align: center; }
+    .rank-page[hidden] { display: none; }
     .rank-value { color: var(--muted); font-size: 12px; }
     .detail-card { min-height: 520px; overflow: hidden; }
     .detail-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 22px 24px 16px; }
@@ -448,7 +400,7 @@
          visible scrollbar, which read as a broken control at narrow widths. */
       body[data-layout="compact"] .segmented { width: 100%; max-width: 100%; justify-content: flex-start; flex-wrap: wrap; row-gap: 3px; border-radius: 14px; }
       body[data-layout="compact"] .segmented .period-button { flex: 0 0 auto; }
-      body[data-layout="compact"] .control-divider, body[data-layout="compact"] .filter-field label { display: none; }
+      body[data-layout="compact"] .control-divider, body[data-layout="compact"] .filter-field label, body[data-layout="compact"] #model-field { display: none; }
       /* The source switcher stays labelled in compact mode: it is the only
          control that changes which agent is being measured, so dropping its
          label would leave an unidentifiable bare dropdown. */
@@ -533,21 +485,9 @@
         <input id="custom-end" type="date" aria-label="结束日期">
       </div>
       <span class="control-divider"></span>
-      <div class="filter-field"><label for="provider-filter">供应商</label><div class="select-pager"><button type="button" class="page-arrow" id="provider-prev" aria-label="上一页供应商">‹</button><select id="provider-filter"></select><button type="button" class="page-arrow" id="provider-next" aria-label="下一页供应商">›</button><span class="page-count" id="provider-page" hidden></span></div></div>
-      <div class="filter-field" id="model-field"><label for="model-filter">模型</label><div class="select-pager"><button type="button" class="page-arrow" id="model-prev" aria-label="上一页模型">‹</button><select id="model-filter"></select><button type="button" class="page-arrow" id="model-next" aria-label="下一页模型">›</button><span class="page-count" id="model-page" hidden></span></div></div>
+      <div class="filter-field"><label for="provider-filter">供应商</label><select id="provider-filter"><option>全部供应商</option></select></div>
+      <div class="filter-field" id="model-field"><label for="model-filter">模型</label><select id="model-filter"><option>全部模型</option></select></div>
       <div class="filter-field" id="source-field"><label class="filter-field-label" for="source-filter">来源</label><select id="source-filter"><option value="">全部来源</option></select></div>
-      <div class="filter-tools">
-        <div class="threshold-wrap">
-          <button id="threshold-button" class="soft-button threshold-button" title="用量低于门槛的供应商和模型不出现在筛选列表">门槛 0</button>
-          <div id="threshold-popover" class="threshold-popover" hidden>
-            <div class="popover-title" id="threshold-note" hidden></div>
-            <div class="popover-title">用量低于这个值的供应商 / 模型不再出现在筛选列表。总量不受影响，只是列表更短。</div>
-            <div class="threshold-presets" id="threshold-presets"></div>
-            <label class="threshold-custom" for="threshold-input">自定义<input id="threshold-input" type="number" min="0" step="1000" inputmode="numeric" placeholder="0"></label>
-          </div>
-        </div>
-        <button id="rules-button" class="soft-button" title="隐藏或合并不想看的供应商和模型">模型规则</button>
-      </div>
       <button id="reset-button" class="soft-button">重置筛选</button>
       <div class="control-quick-actions"><button id="pricing-quick-button" class="quick-button" title="打开价格设置">价格</button><button id="currency-quick-button" class="quick-button" title="切换美元/人民币">$</button></div>
     </section>
@@ -608,8 +548,8 @@
           </article>
 
           <div class="two-column">
-            <article class="card section-card"><div class="section-head"><div><h2 class="section-title">供应商</h2><div class="section-subtitle">当前周期 Token 排行</div></div></div><div id="provider-ranking" class="rank-list"></div></article>
-            <article class="card section-card"><div class="section-head"><div><h2 class="section-title">模型</h2><div class="section-subtitle">当前周期 Token 排行</div></div></div><div id="model-ranking" class="rank-list"></div></article>
+            <article class="card section-card"><div class="section-head"><div><h2 class="section-title">供应商</h2><div class="section-subtitle">当前周期 Token 排行</div></div><div class="rank-pager" data-rank="provider"><button type="button" class="rank-arrow" data-rank-step="-1" aria-label="上一页供应商">‹</button><span class="rank-page" data-rank-page="provider" hidden></span><button type="button" class="rank-arrow" data-rank-step="1" aria-label="下一页供应商">›</button></div></div><div id="provider-ranking" class="rank-list"></div></article>
+            <article class="card section-card"><div class="section-head"><div><h2 class="section-title">模型</h2><div class="section-subtitle">当前周期 Token 排行</div></div><div class="rank-pager" data-rank="model"><button type="button" class="rank-arrow" data-rank-step="-1" aria-label="上一页模型">‹</button><span class="rank-page" data-rank-page="model" hidden></span><button type="button" class="rank-arrow" data-rank-step="1" aria-label="下一页模型">›</button></div></div><div id="model-ranking" class="rank-list"></div></article>
           </div>
         </div>
 
@@ -642,16 +582,6 @@
   </aside>
   <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
   <div id="pricing-backdrop" class="pricing-backdrop" hidden></div>
-  <section id="rules-modal" class="pricing-dialog" hidden aria-label="模型规则">
-    <div class="pricing-head"><div><div class="eyebrow">Model Rules</div><h2>模型规则</h2><div class="pricing-subtitle">规则只影响显示：被隐藏的行仍计入总量，原始记录一直保留在数据库里，删掉规则即可恢复。</div></div><button id="rules-close" class="icon-button" aria-label="关闭">×</button></div>
-    <div class="pricing-body">
-      <section class="pricing-section"><div class="pricing-section-title">隐藏供应商</div><div class="pricing-section-note">不出现在筛选列表、供应商排行和请求日志里，但用量仍计入总量。</div><div class="rule-row"><input id="hidden-provider-input" placeholder="例如 workbuddy，或用 * 匹配多个"><button id="add-hidden-provider" class="pricing-add" type="button">添加</button></div><div class="rule-list" id="hidden-provider-list"></div></section>
-      <section class="pricing-section"><div class="pricing-section-title">隐藏模型</div><div class="pricing-section-note">用于剔掉中转或调试时产生的别名模型。</div><div class="rule-row"><input id="hidden-model-input" placeholder="例如 *-preview，或 gpt-4o-mini"><button id="add-hidden-model" class="pricing-add" type="button">添加</button></div><div class="rule-list" id="hidden-model-list"></div></section>
-      <section class="pricing-section"><div class="pricing-section-title">合并模型</div><div class="pricing-section-note">把同一个模型的多个别名归并成一行，Token 累加；归并后的名字也会用于查询 model.dev 价格。第一个匹配的规则生效。</div><div class="rule-row"><input id="alias-source-input" placeholder="原始名称，如 gpt-5.6-*"><span class="rule-arrow">→</span><input id="alias-target-input" placeholder="归并为，如 gpt-5.6"><button id="add-alias" class="pricing-add" type="button">添加</button></div><div class="rule-list" id="alias-list"></div></section>
-      <section class="pricing-section"><div class="pricing-section-note">匹配忽略大小写。含 <code>*</code> 或 <code>?</code> 时按通配符匹配，否则按子串匹配。</div></section>
-    </div>
-    <div class="pricing-footer"><div class="pricing-footer-note" id="rules-status-note">保存后立即生效。</div><div class="pricing-footer-actions"><button id="rules-clear" class="soft-button">清空规则</button><button id="rules-cancel" class="soft-button">取消</button><button id="rules-save" class="primary-button">保存并重算</button></div></div>
-  </section>
   <section id="pricing-modal" class="pricing-dialog" hidden aria-label="价格设置">
     <div class="pricing-head"><div><div class="eyebrow">Pricing Settings</div><h2>价格设置</h2><div class="pricing-subtitle">所有价格单位均为 USD / 1M tokens；保存后立即重新计算历史统计。</div></div><button id="pricing-close" class="icon-button" aria-label="关闭">×</button></div>
     <div class="pricing-body">
@@ -671,7 +601,7 @@
       "use strict";
       const $ = (selector) => document.querySelector(selector);
       const $$ = (selector) => [...document.querySelectorAll(selector)];
-      const state = { period: "today", provider: "", model: "", view: "overview", metric: "total_with_cache", customStart: "", customEnd: "", search: "", sortKey: "", sortDirection: "desc", currentRows: [], data: null, sequence: 0, redrawAfter: 0, compact: false, pricingSettings: null, pricingDraftRows: [], source: "", minTokens: 0, modelRules: { hidden_providers: [], hidden_models: [], aliases: [] }, rulesDraft: null, providerPage: 0, modelPage: 0, providerItems: [], modelItems: [] };
+      const state = { period: "today", provider: "", model: "", view: "overview", metric: "total_with_cache", customStart: "", customEnd: "", search: "", sortKey: "", sortDirection: "desc", currentRows: [], data: null, sequence: 0, redrawAfter: 0, compact: false, pricingSettings: null, pricingDraftRows: [], source: "", rankPage: { provider: 0, model: 0 } };
       const pricingRateFields = ["input", "output", "reasoning", "cache_read", "cache_write"];
       const metricKeys = { "总 Token":"total_with_cache", "请求次数":"requests", "输入 Token":"input_tokens", "输出 Token":"output_tokens", "推理 Token":"reasoning_tokens", "缓存命中":"cache_hit_tokens", "成本":"total_cost" };
       const tableConfig = {
@@ -779,61 +709,15 @@
       function applyTheme(theme) { document.documentElement.dataset.theme = theme === "light" ? "light" : "dark"; $("#theme-button").title = theme === "light" ? "切换深色" : "切换浅色"; }
       function updateLayout() { const dpr=window.devicePixelRatio||1; const effectiveWidth=window.innerWidth/dpr; const effectiveHeight=window.innerHeight/dpr; const compact = effectiveWidth < 760 || effectiveHeight < 680; if (compact !== state.compact) { state.compact = compact; document.body.dataset.layout = compact ? "compact" : "full"; if (state.data) { renderOptions(state.data.options); renderCurrent(); } } else document.body.dataset.layout = compact ? "compact" : "full"; if (state.data?.trend) scheduleChart(); }
       function renderOptions(options) {
-        // Every option carries the usage it accounts for in the current period,
-        // so the list can be scanned by size instead of read name by name.
-        state.providerItems = (options?.providers || []).map(item => ({
-          value: item.value ?? item.name, text: `${item.value ?? item.name} · ${compactFmt(item.total || 0)}`,
-        }));
-        state.modelItems = (options?.models || []).map(item => ({
-          value: item.label, text: `${item.label} · ${compactFmt(item.total || 0)}`,
-        }));
-        if (paintFilter("provider")) state.provider = "";
-        if (paintFilter("model")) state.model = "";
+        const providers = ["全部供应商", ...(options?.providers || [])];
+        const models = ["全部模型", ...(options?.models || []).map(x => x.label)];
+        fillSelect($("#provider-filter"), providers, state.provider || "全部供应商");
+        fillSelect($("#model-filter"), models, state.model || "全部模型");
         renderSourceOptions(options);
-        renderThresholdControl(options);
         const active=[]; if(state.provider)active.push(`供应商：${state.provider}`); if(state.model)active.push(`模型：${state.model}`); if(state.source)active.push(`来源：${sourceLabel(state.source, options)}`);
         const filterSummary=$("#active-filter-summary"); filterSummary.hidden=!active.length; filterSummary.textContent=active.length?`${active.join(" · ")}  ×`:"";
         filterSummary.style.display=state.compact&&active.length?"block":"none";
       }
-      // Only the top slice is shown; the rest is reached with the arrows. The
-      // whole list still travels in the response, so turning a page never costs
-      // another query.
-      const FILTER_PAGE_SIZE = 5;
-      const FILTER_PAGERS = {
-        provider: { select:"#provider-filter", prev:"#provider-prev", next:"#provider-next", counter:"#provider-page", page:"providerPage", all:"全部供应商", items:"providerItems", selected:"provider" },
-        model: { select:"#model-filter", prev:"#model-prev", next:"#model-next", counter:"#model-page", page:"modelPage", all:"全部模型", items:"modelItems", selected:"model" },
-      };
-      function paintFilter(which) {
-        const cfg = FILTER_PAGERS[which];
-        const select = $(cfg.select);
-        if (!select) return false;
-        const items = state[cfg.items] || [];
-        const pages = Math.max(1, Math.ceil(items.length / FILTER_PAGE_SIZE));
-        const index = items.findIndex(item => item.value === state[cfg.selected]);
-        // A live selection always wins over the remembered page: it must never
-        // sit on a page the user is not currently looking at.
-        let page = index >= 0 ? Math.floor(index / FILTER_PAGE_SIZE) : (Number(state[cfg.page]) || 0);
-        page = Math.max(0, Math.min(page, pages - 1));
-        state[cfg.page] = page;
-        const slice = items.slice(page * FILTER_PAGE_SIZE, (page + 1) * FILTER_PAGE_SIZE);
-        select.innerHTML = [{ value: "", text: cfg.all }, ...slice]
-          .map(item => `<option value="${esc(item.value)}">${esc(item.text)}</option>`).join("");
-        select.value = index >= 0 ? state[cfg.selected] : "";
-        const many = pages > 1;
-        const prev = $(cfg.prev), next = $(cfg.next), counter = $(cfg.counter);
-        if (prev) prev.disabled = !many || page === 0;
-        if (next) next.disabled = !many || page === pages - 1;
-        if (counter) { counter.textContent = `${page + 1}/${pages}`; counter.hidden = !many; }
-        return index < 0;
-      }
-      const turnFilterPage = (which, delta) => {
-        const cfg = FILTER_PAGERS[which];
-        state[cfg.page] = (Number(state[cfg.page]) || 0) + delta;
-        paintFilter(which);
-      };
-      // Called when the list itself is rebuilt from a different set of rows, so
-      // paging always starts from the biggest entries again.
-      const resetFilterPages = () => { state.providerPage = 0; state.modelPage = 0; };
       // Additive source selector. A single-source setup keeps showing the
       // same "全部来源" default, so existing dashboards are unchanged.
       // The option value is always the machine key and the text is always the
@@ -859,78 +743,7 @@
         if (!select.value) state.source = "";
         select.title = sources.length > 1 ? "按 Agent 切换用量来源" : "当前仅一个数据来源";
       }
-      // --- usage floor ------------------------------------------------------
-      // Only shortens the lists. It is not a filter, so the summary, the trend
-      // and the cost are computed from exactly the same data either way.
-      const THRESHOLD_PRESETS = [0, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8];
-      const closeThreshold = () => {
-        const popover = $("#threshold-popover"); if (!popover) return;
-        popover.hidden = true; $("#threshold-button")?.setAttribute("aria-expanded", "false");
-      };
-      const applyThreshold = async (tokens) => {
-        const value = Math.max(0, Math.min(1e10, Number(tokens) || 0));
-        state.minTokens = value;
-        resetFilterPages();
-        renderThresholdControl(state.data?.options);
-        // Remembered in the config so the next launch does not present the full
-        // unfiltered lists again.
-        try { await callApi("set_filter_min_tokens", value); } catch (error) { toast(`保存门槛失败：${error}`); }
-        await loadView();
-      };
-      function renderThresholdControl(options) {
-        const button = $("#threshold-button"); const input = $("#threshold-input");
-        const presets = $("#threshold-presets");
-        if (!button || !input || !presets) return;
-        const value = state.minTokens;
-        button.textContent = value > 0 ? `门槛 ${compactFmt(value)}` : "门槛 0";
-        button.dataset.active = value > 0 ? "1" : "0";
-        button.title = value > 0
-          ? `用量低于 ${formatInt(value)} 的供应商和模型已从列表隐藏（点击修改）`
-          : "用量低于门槛的供应商和模型不出现在筛选列表";
-        input.value = THRESHOLD_PRESETS.includes(value) ? "" : value;
-        presets.innerHTML = THRESHOLD_PRESETS.map(item =>
-          `<button type="button" class="threshold-preset${item === value ? " active" : ""}" data-threshold="${item}">${item === 0 ? "全部" : compactFmt(item)}</button>`
-        ).join("");
-        const hidden = options?.hidden || {};
-        const total = (hidden.providers || 0) + (hidden.models || 0);
-        const note = $("#threshold-note");
-        if (note) {
-          note.textContent = total > 0 ? `已按门槛隐藏 ${total} 项（用量仍计入总量）` : "";
-          note.hidden = total === 0;
-        }
-      }
-      // --- hide / merge rules ----------------------------------------------
-      const rulesDraft = () => state.rulesDraft || { hidden_providers: [], hidden_models: [], aliases: [] };
-      const renderRuleLists = () => {
-        const draft = rulesDraft();
-        const chips = (items, kind) => items.map((text, index) =>
-          `<span class="rule-chip"><span>${esc(text)}</span><button type="button" data-rule-kind="${kind}" data-rule-index="${index}" aria-label="移除">×</button></span>`).join("");
-        $("#hidden-provider-list").innerHTML = chips(draft.hidden_providers, "hidden_providers");
-        $("#hidden-model-list").innerHTML = chips(draft.hidden_models, "hidden_models");
-        $("#alias-list").innerHTML = draft.aliases.map(([pattern, target], index) =>
-          `<span class="rule-chip"><span>${esc(pattern)}</span><span class="rule-arrow">→</span><span>${esc(target)}</span><button type="button" data-rule-kind="aliases" data-rule-index="${index}" aria-label="移除">×</button></span>`).join("");
-        $$("[data-rule-kind]").forEach(button => button.addEventListener("click", () => {
-          const draft = rulesDraft(); const kind = button.dataset.ruleKind;
-          if (kind === "aliases") draft.aliases.splice(Number(button.dataset.ruleIndex), 1);
-          else draft[kind].splice(Number(button.dataset.ruleIndex), 1);
-          renderRuleLists();
-        }));
-      };
-      const openModelRules = () => {
-        state.rulesDraft = {
-          hidden_providers: [...(state.modelRules?.hidden_providers || [])],
-          hidden_models: [...(state.modelRules?.hidden_models || [])],
-          aliases: (state.modelRules?.aliases || []).map(item => [item[0], item[1]]),
-        };
-        $("#hidden-provider-input").value = ""; $("#hidden-model-input").value = "";
-        $("#alias-source-input").value = ""; $("#alias-target-input").value = "";
-        renderRuleLists();
-        $("#pricing-backdrop").hidden = false; $("#rules-modal").hidden = false;
-      };
-      const closeModelRules = () => {
-        $("#rules-modal").hidden = true;
-        if ($("#pricing-modal").hidden) $("#pricing-backdrop").hidden = true;
-      };
+      function fillSelect(select, values, selected) { select.innerHTML = values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join(""); select.value = values.includes(selected) ? selected : values[0]; }
       // Percentages of each coloured segment, so the bar can be read without
       // hovering. Shares are computed against the same total the bar uses.
       function renderTokenShare(parts, summary) {
@@ -982,7 +795,12 @@
         const top = (data.providers || []).slice(0,6); const topModels = (data.models || []).slice(0,6); $("#compact-providers").innerHTML = top.length ? top.map(r => `<div class="compact-list-row"><span>${esc(r.name)}</span><strong>${compactFmt(r.total_with_cache)}</strong></div>`).join("") : `<div class="section-subtitle">暂无数据</div>`; $("#compact-models").innerHTML = topModels.length ? topModels.map(r => `<div class="compact-list-row"><span title="${esc(r.name)}">${esc(r.name)}</span><strong>${compactFmt(r.total_with_cache)}</strong></div>`).join("") : `<div class="section-subtitle">暂无数据</div>`;
         if(state.compact)drawChart($("#compact-trend-svg"), $("#compact-tooltip"), data.trend || []);else drawChart($("#trend-svg"), $("#chart-tooltip"), data.trend || []);
       }
-      function renderRanking(selector, rows) { const top = rows.slice(0,6); const max = Math.max(1, ...top.map(r => Number(r.total_with_cache || 0))); $(selector).innerHTML = top.length ? top.map(r => `<div class="rank-item"><div class="rank-name" title="${esc(r.name)}">${esc(r.name)}</div><div class="rank-track"><div class="rank-fill" style="width:${Number(r.total_with_cache || 0) / max * 100}%"></div></div><div class="rank-value">${compactFmt(r.total_with_cache)}</div></div>`).join("") : `<div class="section-subtitle">暂无数据</div>`; }
+      // Only the top five are listed; the arrows walk through the rest. The
+      // scale is taken from the largest entry overall rather than from the
+      // visible page, so a bar never looks full just because the biggest entry
+      // happens to be on another page.
+      const RANK_PAGE_SIZE = 5;
+      function renderRanking(selector, rows) { const rank = selector === "#provider-ranking" ? "provider" : "model"; const pages = Math.max(1, Math.ceil(rows.length / RANK_PAGE_SIZE)); const page = Math.max(0, Math.min(Number(state.rankPage?.[rank] ?? 0) || 0, pages - 1)); if (state.rankPage) state.rankPage[rank] = page; const top = rows.slice(page * RANK_PAGE_SIZE, (page + 1) * RANK_PAGE_SIZE); const max = Math.max(1, ...rows.map(r => Number(r.total_with_cache || 0))); $(selector).innerHTML = top.length ? top.map(r => `<div class="rank-item"><div class="rank-name" title="${esc(r.name)}">${esc(r.name)}</div><div class="rank-track"><div class="rank-fill" style="width:${Number(r.total_with_cache || 0) / max * 100}%"></div></div><div class="rank-value">${compactFmt(r.total_with_cache)}</div></div>`).join("") : `<div class="section-subtitle">暂无数据</div>`; const arrows = $$(`[data-rank="${rank}"] [data-rank-step]`); const label = $(`[data-rank-page="${rank}"]`); const many = pages > 1; arrows.forEach(button => { button.disabled = !many || (Number(button.dataset.rankStep) < 0 ? page === 0 : page === pages - 1); }); if (label) { label.textContent = `${page + 1}/${pages}`; label.hidden = !many; } }
       function renderDetail(data) {
         const cfg = tableConfig[state.view];
         let rows = [...(data[cfg.rows] || [])];
@@ -1022,53 +840,13 @@
         if (["requests","total_with_cache","input_tokens","output_tokens","reasoning_tokens","cache_read_tokens","total_without_cache_read","amount","threshold"].includes(key)) return esc(compactFmt(row[key]));
         return esc(row[key] ?? "—");
       }
-      // Monotone cubic (Fritsch-Carlson) interpolation.
-      // Straight segments make a busy series look like a zigzag. A plain
-      // Catmull-Rom or Bezier would round the corners but could also overshoot
-      // and draw a peak the data never had, so this variant is used instead: it
-      // passes through every point and cannot exceed the neighbouring values in
-      // the gaps. The numbers stay exactly as recorded; only the stroke changes.
-      function smoothPath(points) {
-        const n = points.length;
-        const at = (p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`;
-        if (n === 0) return "";
-        if (n === 1) return `M${at(points[0])}`;
-        if (n === 2) return `M${at(points[0])} L${at(points[1])}`;
-        const dx = [], slope = [];
-        for (let i = 0; i < n - 1; i++) {
-          const step = points[i + 1][0] - points[i][0];
-          dx.push(step);
-          // A repeated x would divide by zero; the axis guarantees it cannot
-          // happen, but a zero step must not become a NaN slope if it ever does.
-          slope.push(step === 0 ? 0 : (points[i + 1][1] - points[i][1]) / step);
-        }
-        const tangent = new Array(n);
-        tangent[0] = slope[0];
-        tangent[n - 1] = slope[n - 2];
-        for (let i = 1; i < n - 1; i++) {
-          // A sign change means a local peak or valley, which is pinned flat so
-          // the curve cannot bulge past the point itself.
-          if (slope[i - 1] * slope[i] <= 0) { tangent[i] = 0; continue; }
-          const w1 = 2 * dx[i] + dx[i - 1], w2 = dx[i] + 2 * dx[i - 1];
-          tangent[i] = (w1 + w2) / (w1 / slope[i - 1] + w2 / slope[i]);
-        }
-        let d = `M${at(points[0])}`;
-        for (let i = 0; i < n - 1; i++) {
-          const third = dx[i] / 3;
-          d += ` C${(points[i][0] + third).toFixed(1)},${(points[i][1] + third * tangent[i]).toFixed(1)} ${(points[i + 1][0] - third).toFixed(1)},${(points[i + 1][1] - third * tangent[i + 1]).toFixed(1)} ${at(points[i + 1])}`;
-        }
-        return d;
-      }
       function drawChart(svg, tooltip, rows) {
         if (!svg) return; const rect = svg.getBoundingClientRect(); const width = Math.max(320, Math.round(rect.width || 900)); const height = Math.max(180, Math.round(rect.height || 300)); const pad = state.compact ? {l:42,r:12,t:14,b:28} : {l:58,r:18,t:20,b:34}; const innerW = width - pad.l - pad.r, innerH = height - pad.t - pad.b; svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
         if (!rows.length) { svg.innerHTML = `<text x="${width/2}" y="${height/2}" text-anchor="middle" fill="var(--muted)" font-size="12">暂无趋势数据</text>`; return; }
         const values = rows.map(r => Number(state.metric === "cache_hit_tokens" ? cacheHitTokens(r) : (r[state.metric] || 0))); let max = Math.max(...values, 0); max = max > 0 ? max * 1.1 : 1; const x = i => pad.l + (rows.length === 1 ? innerW/2 : i * innerW/(rows.length-1)); const y = v => pad.t + innerH - (v/max)*innerH;
         let grid = ""; for (let i=0;i<5;i++){ const gy=pad.t+innerH*i/4; const value=max*(1-i/4); grid += `<line x1="${pad.l}" y1="${gy}" x2="${width-pad.r}" y2="${gy}" stroke="var(--border-soft)" stroke-dasharray="3 5"/><text x="${pad.l-8}" y="${gy+4}" text-anchor="end" fill="var(--muted)" font-size="9">${state.metric==="total_cost"?moneyFmt(value):compactFmt(value)}</text>`; }
-        const points = rows.map((r,i)=>[x(i),y(values[i])]); const line = smoothPath(points); const area = `${line} L${points.at(-1)[0].toFixed(1)},${pad.t+innerH} L${points[0][0].toFixed(1)},${pad.t+innerH} Z`; const every = Math.max(1,Math.ceil(rows.length/(state.compact?4:7))); let labels=""; rows.forEach((r,i)=>{if(i%every===0||i===rows.length-1){const raw=String(r.bucket);labels+=`<text x="${x(i)}" y="${height-10}" text-anchor="middle" fill="var(--muted)" font-size="9">${esc(raw.length>5?raw.slice(-5):raw)}</text>`;}});
-        // Dots are only decoration, so they thin out as the series gets dense.
-        // A dot on every one of 90 buckets fought the curve for attention.
-        const dotLimit = state.compact ? 18 : 30;
-        const dots = rows.length <= dotLimit ? points.map(p=>`<circle cx="${p[0]}" cy="${p[1]}" r="2.5" fill="var(--accent)" stroke="var(--surface)" stroke-width="1"/>`).join("") : "";
+        const points = rows.map((r,i)=>[x(i),y(values[i])]); const line = points.map((p,i)=>`${i?"L":"M"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" "); const area = `${line} L${points.at(-1)[0]},${pad.t+innerH} L${points[0][0]},${pad.t+innerH} Z`; const every = Math.max(1,Math.ceil(rows.length/(state.compact?4:7))); let labels=""; rows.forEach((r,i)=>{if(i%every===0||i===rows.length-1){const raw=String(r.bucket);labels+=`<text x="${x(i)}" y="${height-10}" text-anchor="middle" fill="var(--muted)" font-size="9">${esc(raw.length>5?raw.slice(-5):raw)}</text>`;}});
+        const dots = rows.length <= (state.compact?30:90) ? points.map(p=>`<circle cx="${p[0]}" cy="${p[1]}" r="2.5" fill="var(--accent)" stroke="var(--surface)" stroke-width="1"/>`).join("") : "";
         svg.innerHTML = `${grid}<path d="${area}" fill="color-mix(in srgb, var(--accent) 12%, transparent)"/><path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke"/>${dots}${labels}<rect class="chart-hit" x="${pad.l}" y="${pad.t}" width="${innerW}" height="${innerH}" fill="transparent"/><line class="crosshair" y1="${pad.t}" y2="${pad.t+innerH}" stroke="var(--muted)" stroke-dasharray="3 4" opacity="0"/><circle class="hover-dot" r="4" fill="var(--text)" stroke="var(--accent)" stroke-width="2" opacity="0"/>`;
         const hit = svg.querySelector(".chart-hit"), cross = svg.querySelector(".crosshair"), dot = svg.querySelector(".hover-dot");
         const move = (event) => { const box=svg.getBoundingClientRect(); const px=(event.clientX-box.left)*(width/box.width); const nearest=points.reduce((best,p,i)=>Math.abs(p[0]-px)<Math.abs(points[best][0]-px)?i:best,0); const [cx,cy]=points[nearest]; cross.setAttribute("x1",cx);cross.setAttribute("x2",cx);cross.setAttribute("opacity",".75");dot.setAttribute("cx",cx);dot.setAttribute("cy",cy);dot.setAttribute("opacity","1"); const row=rows[nearest]; tooltip.innerHTML=`<div class="tooltip-title">${esc(String(row.bucket).replaceAll("-","/"))}</div>${[["总 Token",compactFmt(row.total_with_cache)],["请求次数",fmt(row.requests)],["输入",compactFmt(row.input_tokens)],["输出",compactFmt(row.output_tokens)],["推理",compactFmt(row.reasoning_tokens)],["缓存命中",compactFmt(cacheHitTokens(row))],["账单成本",moneyFmt(row.billed_cost)],["估算成本",moneyFmt(row.estimated_cost)],["采用成本",moneyFmt(row.total_cost)]].map(([k,v])=>`<div class="tooltip-row"><span>${k}</span><strong>${v}</strong></div>`).join("")}`; tooltip.classList.add("visible"); const tw=240; let left=(cx/width)*box.width+14;if(left+tw>box.width-8)left=(cx/width)*box.width-tw-14;tooltip.style.left=`${Math.max(6,left)}px`;tooltip.style.top=`${Math.max(8,Math.min(box.height-245,(cy/height)*box.height-60))}px`; };
@@ -1079,17 +857,13 @@
         if(state.period==="custom"&&(!state.customStart||!state.customEnd||state.customEnd<state.customStart)){toast("请选择有效的开始和结束日期");return;}
         const sequence=++state.sequence; showLoading(true);
         try {
-          const data=await callApi("get_dashboard",state.period,state.provider,state.model,state.view,state.customStart,state.customEnd,state.source,state.minTokens);
+          const data=await callApi("get_dashboard",state.period,state.provider,state.model,state.view,state.customStart,state.customEnd,state.source);
           if(sequence!==state.sequence)return;
           // Any successful render re-baselines both timers, whether it came
           // from a filter change, the refresh button, or the auto tick.
           lastSeenSync=Number(data.runtime?.last_sync||0);
           lastRenderedAt=Date.now();
-          state.data=data; applyTheme(data.theme); const rt=data.runtime||{}; displayCurrency=rt.display_currency||"USD"; usdCnyRate=Number(rt.usd_cny_rate||7.2); updateCurrencyButton();
-          // Seeded from the backend only on the first load: re-reading them on
-          // every render would undo a threshold or rule the user just set.
-          if (state.sequence === 1) { state.minTokens = Number(rt.filter_min_tokens || 0); state.modelRules = rt.model_rules || state.modelRules; }
-          renderOptions(data.options); renderCurrent();
+          state.data=data; applyTheme(data.theme); const rt=data.runtime||{}; displayCurrency=rt.display_currency||"USD"; usdCnyRate=Number(rt.usd_cny_rate||7.2); updateCurrencyButton(); renderOptions(data.options); renderCurrent();
           const pill=$("#status-pill");
           const anyRunning=rt.opencode_running||rt.workbuddy_running;
           pill.className=`status-pill ${rt.last_error?"error":anyRunning?"running":""}`;
@@ -1110,37 +884,21 @@
         finally{if(sequence===state.sequence)showLoading(false);}
       }
       function bind() {
-        $$(".period-button").forEach(button=>button.addEventListener("click",()=>{if(state.period===button.dataset.period)return;state.period=button.dataset.period;resetFilterPages();$$(".period-button").forEach(b=>b.classList.toggle("active",b===button));const custom=state.period==="custom";$("#custom-range").hidden=!custom;if(custom){const today=new Date(),start=new Date(today);start.setDate(today.getDate()-13);if(!state.customStart){state.customStart=localDate(start);state.customEnd=localDate(today);}$("#custom-start").value=state.customStart;$("#custom-end").value=state.customEnd;}loadView();}));
+        $$(".period-button").forEach(button=>button.addEventListener("click",()=>{if(state.period===button.dataset.period)return;state.period=button.dataset.period;state.rankPage={provider:0,model:0};$$(".period-button").forEach(b=>b.classList.toggle("active",b===button));const custom=state.period==="custom";$("#custom-range").hidden=!custom;if(custom){const today=new Date(),start=new Date(today);start.setDate(today.getDate()-13);if(!state.customStart){state.customStart=localDate(start);state.customEnd=localDate(today);}$("#custom-start").value=state.customStart;$("#custom-end").value=state.customEnd;}loadView();}));
         $$(".view-tab").forEach(button=>button.addEventListener("click",()=>{if(state.view===button.dataset.view)return;state.view=button.dataset.view;state.search="";state.sortKey="";state.sortDirection="desc";$$(".view-tab").forEach(b=>b.classList.toggle("active",b===button));$("#overview-view").classList.toggle("active",state.view==="overview");$("#detail-view").classList.toggle("active",state.view!=="overview");loadView();}));
         $("#custom-start").addEventListener("change",e=>{state.customStart=e.target.value;loadView();});
         $("#custom-end").addEventListener("change",e=>{state.customEnd=e.target.value;loadView();});
-        $("#provider-filter").addEventListener("change",e=>{state.provider=e.target.value||"";state.model="";state.modelPage=0;$("#model-filter").value="";loadView();});
-        // Deliberately does not touch the provider: the model filter stands on
-        // its own, so picking a model must not silently narrow by provider too.
-        $("#model-filter").addEventListener("change",e=>{state.model=e.target.value||"";loadView();});
-        $("#provider-prev").addEventListener("click",()=>turnFilterPage("provider",-1));
-        $("#provider-next").addEventListener("click",()=>turnFilterPage("provider",1));
-        $("#model-prev").addEventListener("click",()=>turnFilterPage("model",-1));
-        $("#model-next").addEventListener("click",()=>turnFilterPage("model",1));
-        $("#source-filter").addEventListener("change",e=>{state.source=e.target.value||"";state.provider="";state.model="";resetFilterPages();$("#provider-filter").value="";$("#model-filter").value="";loadView();});
-        $("#reset-button").addEventListener("click",()=>{state.provider="";state.model="";state.source="";resetFilterPages();$("#provider-filter").value="";$("#model-filter").value="";$("#source-filter").value="";loadView();});
-        $("#threshold-button").addEventListener("click",e=>{e.stopPropagation();const popover=$("#threshold-popover");const open=popover.hidden;popover.hidden=!open;$("#threshold-button").setAttribute("aria-expanded",String(open));});
-        document.addEventListener("click",e=>{if(!e.target.closest(".threshold-wrap"))closeThreshold();});
-        $("#threshold-presets").addEventListener("click",e=>{const button=e.target.closest("[data-threshold]");if(button)applyThreshold(Number(button.dataset.threshold));});
-        $("#threshold-input").addEventListener("change",e=>applyThreshold(e.target.value));
-        $("#rules-button").addEventListener("click",openModelRules);
-        $("#rules-close").addEventListener("click",closeModelRules); $("#rules-cancel").addEventListener("click",closeModelRules);
-        $("#pricing-backdrop").addEventListener("click",()=>{closeModelRules();closePricingSettings();});
-        const addRuleText=(inputId,kind)=>{const input=$(`#${inputId}`);const value=input.value.trim();if(!value)return;const draft=rulesDraft();if(!draft[kind].includes(value))draft[kind].push(value);input.value="";renderRuleLists();};
-        $("#add-hidden-provider").addEventListener("click",()=>addRuleText("hidden-provider-input","hidden_providers"));
-        $("#add-hidden-model").addEventListener("click",()=>addRuleText("hidden-model-input","hidden_models"));
-        $("#add-alias").addEventListener("click",()=>{const source=$("#alias-source-input").value.trim();const target=$("#alias-target-input").value.trim();if(!source||!target){toast("请填写原始名称和归并后的名称");return;}const draft=rulesDraft();draft.aliases=draft.aliases.filter(item=>item[0]!==source);draft.aliases.push([source,target]);$("#alias-source-input").value="";$("#alias-target-input").value="";renderRuleLists();});
-        $("#rules-clear").addEventListener("click",()=>{state.rulesDraft={hidden_providers:[],hidden_models:[],aliases:[]};renderRuleLists();});
-        $("#rules-save").addEventListener("click",async()=>{const draft=rulesDraft();try{const result=await callApi("save_model_rules",draft.hidden_providers,draft.hidden_models,Object.fromEntries(draft.aliases));state.modelRules=result.model_rules;resetFilterPages();closeModelRules();await loadView();toast("模型规则已保存");}catch(error){toast(`保存模型规则失败：${error}`);}});
+        $("#provider-filter").addEventListener("change",e=>{state.provider=e.target.value==="全部供应商"?"":e.target.value;state.model="";state.rankPage={provider:0,model:0};$("#model-filter").value="全部模型";loadView();});
+        $("#model-filter").addEventListener("change",e=>{state.model=e.target.value==="全部模型"?"":e.target.value;const option=(state.data?.options?.models||[]).find(x=>x.label===state.model);if(option)state.provider=option.provider;state.rankPage={provider:0,model:0};$("#provider-filter").value=state.provider||"全部供应商";loadView();});
+        $("#source-filter").addEventListener("change",e=>{state.source=e.target.value||"";state.provider="";state.model="";state.rankPage={provider:0,model:0};$("#provider-filter").value="全部供应商";$("#model-filter").value="全部模型";loadView();});
+        $("#reset-button").addEventListener("click",()=>{state.provider="";state.model="";state.source="";state.rankPage={provider:0,model:0};$("#provider-filter").value="全部供应商";$("#model-filter").value="全部模型";$("#source-filter").value="";loadView();});
+        // Ranking pager. A page turn repaints from the rows already in memory,
+        // so it never re-queries the source data.
+        $$("[data-rank-step]").forEach(button=>button.addEventListener("click",()=>{const rank=button.dataset.rank;const rows=rank==="provider"?(state.data?.providers||[]):(state.data?.models||[]);const pages=Math.max(1,Math.ceil(rows.length/RANK_PAGE_SIZE));state.rankPage[rank]=Math.max(0,Math.min((Number(state.rankPage[rank])||0)+Number(button.dataset.rankStep),pages-1));if(state.data)renderCurrent();}));
         $("#active-filter-summary").addEventListener("click",()=>{$("#reset-button").click();});
         $("#detail-search").addEventListener("input",e=>{state.search=e.target.value;if(state.data)renderDetail(state.data);});
         $("#drawer-close").addEventListener("click",closeRequestDrawer); $("#drawer-backdrop").addEventListener("click",closeRequestDrawer);
-        document.addEventListener("keydown",e=>{if(e.key==="Escape"){if(!$("#rules-modal").hidden)closeModelRules();else if(!$("#pricing-modal").hidden)closePricingSettings();else{closeThreshold();closeRequestDrawer();}}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="f"){e.preventDefault();$("#provider-filter").focus();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="r"){e.preventDefault();$("#refresh-button").click();}});
+        document.addEventListener("keydown",e=>{if(e.key==="Escape"){if(!$("#pricing-modal").hidden)closePricingSettings();else closeRequestDrawer();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="f"){e.preventDefault();$("#provider-filter").focus();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="r"){e.preventDefault();$("#refresh-button").click();}});
         $("#metric-filter").addEventListener("change",e=>{state.metric=metricKeys[e.target.value];scheduleChart();});
         $("#theme-button").addEventListener("click",async()=>{const next=document.documentElement.dataset.theme==="light"?"dark":"light";applyTheme(next);try{await callApi("set_theme",next);}catch(error){toast(`主题设置失败：${error}`);}});
         $("#refresh-button").addEventListener("click",async()=>{showLoading(true);try{const result=await callApi("refresh");await loadView();const running=result.opencode_running||result.workbuddy_running;toast(running?"已同步本地数据":"没有正在运行的 Agent，仅刷新历史视图");}catch(error){toast(`刷新失败：${error}`);}finally{showLoading(false);}});
@@ -1149,7 +907,7 @@
         const toggleCurrency = async()=>{try{const next=displayCurrency==="CNY"?"USD":"CNY";const result=await callApi("set_display_currency",next,usdCnyRate);displayCurrency=result.display_currency;usdCnyRate=Number(result.usd_cny_rate||usdCnyRate);updateCurrencyButton();$("#currency-quick-button").textContent=displayCurrency==="CNY"?"¥":"$";await loadView();toast(next==="CNY"?`已切换人民币，1 USD = ${usdCnyRate.toFixed(4)} CNY`:"已切换美元");}catch(error){toast(`切换货币失败：${error}`);}};
         $("#currency-button").addEventListener("click",toggleCurrency); $("#currency-quick-button").addEventListener("click",toggleCurrency);
         $("#pricing-quick-button").addEventListener("click",openPricingSettings);
-        $("#pricing-button").addEventListener("click",openPricingSettings); $("#pricing-close").addEventListener("click",closePricingSettings); $("#pricing-cancel").addEventListener("click",closePricingSettings);
+        $("#pricing-button").addEventListener("click",openPricingSettings); $("#pricing-close").addEventListener("click",closePricingSettings); $("#pricing-cancel").addEventListener("click",closePricingSettings); $("#pricing-backdrop").addEventListener("click",closePricingSettings);
         $$(".pricing-mode").forEach(button => button.addEventListener("click",()=>setPricingMode(button.dataset.pricingMode)));
         $("#add-custom-price").addEventListener("click",()=>{state.pricingDraftRows.push({provider:"",model:"",variant:"default",rates:{}});renderPricingRows();setPricingMode("custom");});
         $("#pricing-save").addEventListener("click",async()=>{try{const settings=collectPricingSettings();await callApi("save_pricing_settings",settings);closePricingSettings();await loadView();toast("价格设置已保存并重新计算");}catch(error){toast(`保存价格设置失败：${error}`);}});
