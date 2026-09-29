@@ -155,6 +155,16 @@
     .active-filter-summary[hidden] { display: none; }
     /* Additive: the usage floor that keeps the dropdowns short, and the
        hide/merge rules. Both are display preferences, never a data filter. */
+    .select-pager { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1 1 auto; }
+    .page-arrow {
+      flex: 0 0 auto; width: 24px; height: 38px; padding: 0; color: var(--text-soft);
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px;
+      font-size: 15px; line-height: 1; cursor: pointer;
+    }
+    .page-arrow:hover:not(:disabled) { color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+    .page-arrow:disabled { opacity: .3; cursor: default; }
+    .page-count { flex: 0 0 auto; min-width: 32px; color: var(--muted); font-size: 10px; text-align: center; }
+    .page-count[hidden] { display: none; }
     .filter-tools { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
     .threshold-button { white-space: nowrap; }
     .threshold-button[data-active="1"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
@@ -523,8 +533,8 @@
         <input id="custom-end" type="date" aria-label="结束日期">
       </div>
       <span class="control-divider"></span>
-      <div class="filter-field"><label for="provider-filter">供应商</label><select id="provider-filter"><option>全部供应商</option></select></div>
-      <div class="filter-field" id="model-field"><label for="model-filter">模型</label><select id="model-filter"><option>全部模型</option></select></div>
+      <div class="filter-field"><label for="provider-filter">供应商</label><div class="select-pager"><button type="button" class="page-arrow" id="provider-prev" aria-label="上一页供应商">‹</button><select id="provider-filter"></select><button type="button" class="page-arrow" id="provider-next" aria-label="下一页供应商">›</button><span class="page-count" id="provider-page" hidden></span></div></div>
+      <div class="filter-field" id="model-field"><label for="model-filter">模型</label><div class="select-pager"><button type="button" class="page-arrow" id="model-prev" aria-label="上一页模型">‹</button><select id="model-filter"></select><button type="button" class="page-arrow" id="model-next" aria-label="下一页模型">›</button><span class="page-count" id="model-page" hidden></span></div></div>
       <div class="filter-field" id="source-field"><label class="filter-field-label" for="source-filter">来源</label><select id="source-filter"><option value="">全部来源</option></select></div>
       <div class="filter-tools">
         <div class="threshold-wrap">
@@ -661,7 +671,7 @@
       "use strict";
       const $ = (selector) => document.querySelector(selector);
       const $$ = (selector) => [...document.querySelectorAll(selector)];
-      const state = { period: "today", provider: "", model: "", view: "overview", metric: "total_with_cache", customStart: "", customEnd: "", search: "", sortKey: "", sortDirection: "desc", currentRows: [], data: null, sequence: 0, redrawAfter: 0, compact: false, pricingSettings: null, pricingDraftRows: [], source: "", minTokens: 0, modelRules: { hidden_providers: [], hidden_models: [], aliases: [] }, rulesDraft: null };
+      const state = { period: "today", provider: "", model: "", view: "overview", metric: "total_with_cache", customStart: "", customEnd: "", search: "", sortKey: "", sortDirection: "desc", currentRows: [], data: null, sequence: 0, redrawAfter: 0, compact: false, pricingSettings: null, pricingDraftRows: [], source: "", minTokens: 0, modelRules: { hidden_providers: [], hidden_models: [], aliases: [] }, rulesDraft: null, providerPage: 0, modelPage: 0, providerItems: [], modelItems: [] };
       const pricingRateFields = ["input", "output", "reasoning", "cache_read", "cache_write"];
       const metricKeys = { "总 Token":"total_with_cache", "请求次数":"requests", "输入 Token":"input_tokens", "输出 Token":"output_tokens", "推理 Token":"reasoning_tokens", "缓存命中":"cache_hit_tokens", "成本":"total_cost" };
       const tableConfig = {
@@ -771,29 +781,59 @@
       function renderOptions(options) {
         // Every option carries the usage it accounts for in the current period,
         // so the list can be scanned by size instead of read name by name.
-        if (fillSelectPairs($("#provider-filter"), "全部供应商", (options?.providers || []).map(item => ({
+        state.providerItems = (options?.providers || []).map(item => ({
           value: item.value ?? item.name, text: `${item.value ?? item.name} · ${compactFmt(item.total || 0)}`,
-        })), state.provider)) state.provider = "";
-        if (fillSelectPairs($("#model-filter"), "全部模型", (options?.models || []).map(item => ({
+        }));
+        state.modelItems = (options?.models || []).map(item => ({
           value: item.label, text: `${item.label} · ${compactFmt(item.total || 0)}`,
-        })), state.model)) state.model = "";
+        }));
+        if (paintFilter("provider")) state.provider = "";
+        if (paintFilter("model")) state.model = "";
         renderSourceOptions(options);
         renderThresholdControl(options);
         const active=[]; if(state.provider)active.push(`供应商：${state.provider}`); if(state.model)active.push(`模型：${state.model}`); if(state.source)active.push(`来源：${sourceLabel(state.source, options)}`);
         const filterSummary=$("#active-filter-summary"); filterSummary.hidden=!active.length; filterSummary.textContent=active.length?`${active.join(" · ")}  ×`:"";
         filterSummary.style.display=state.compact&&active.length?"block":"none";
       }
-      // Populate a select from value/text pairs. The value is a machine key and
-      // the text carries the formatted usage, so the two must stay separate:
-      // reusing one string for both is what previously made a selection snap
-      // back to "all" the moment a total changed.
-      function fillSelectPairs(select, allLabel, items, selected) {
-        const values = items.map(item => item.value);
-        select.innerHTML = [{ value: "", text: allLabel }, ...items]
+      // Only the top slice is shown; the rest is reached with the arrows. The
+      // whole list still travels in the response, so turning a page never costs
+      // another query.
+      const FILTER_PAGE_SIZE = 5;
+      const FILTER_PAGERS = {
+        provider: { select:"#provider-filter", prev:"#provider-prev", next:"#provider-next", counter:"#provider-page", page:"providerPage", all:"全部供应商", items:"providerItems", selected:"provider" },
+        model: { select:"#model-filter", prev:"#model-prev", next:"#model-next", counter:"#model-page", page:"modelPage", all:"全部模型", items:"modelItems", selected:"model" },
+      };
+      function paintFilter(which) {
+        const cfg = FILTER_PAGERS[which];
+        const select = $(cfg.select);
+        if (!select) return false;
+        const items = state[cfg.items] || [];
+        const pages = Math.max(1, Math.ceil(items.length / FILTER_PAGE_SIZE));
+        const index = items.findIndex(item => item.value === state[cfg.selected]);
+        // A live selection always wins over the remembered page: it must never
+        // sit on a page the user is not currently looking at.
+        let page = index >= 0 ? Math.floor(index / FILTER_PAGE_SIZE) : (Number(state[cfg.page]) || 0);
+        page = Math.max(0, Math.min(page, pages - 1));
+        state[cfg.page] = page;
+        const slice = items.slice(page * FILTER_PAGE_SIZE, (page + 1) * FILTER_PAGE_SIZE);
+        select.innerHTML = [{ value: "", text: cfg.all }, ...slice]
           .map(item => `<option value="${esc(item.value)}">${esc(item.text)}</option>`).join("");
-        select.value = values.includes(selected) ? selected : "";
-        return select.value === "";
+        select.value = index >= 0 ? state[cfg.selected] : "";
+        const many = pages > 1;
+        const prev = $(cfg.prev), next = $(cfg.next), counter = $(cfg.counter);
+        if (prev) prev.disabled = !many || page === 0;
+        if (next) next.disabled = !many || page === pages - 1;
+        if (counter) { counter.textContent = `${page + 1}/${pages}`; counter.hidden = !many; }
+        return index < 0;
       }
+      const turnFilterPage = (which, delta) => {
+        const cfg = FILTER_PAGERS[which];
+        state[cfg.page] = (Number(state[cfg.page]) || 0) + delta;
+        paintFilter(which);
+      };
+      // Called when the list itself is rebuilt from a different set of rows, so
+      // paging always starts from the biggest entries again.
+      const resetFilterPages = () => { state.providerPage = 0; state.modelPage = 0; };
       // Additive source selector. A single-source setup keeps showing the
       // same "全部来源" default, so existing dashboards are unchanged.
       // The option value is always the machine key and the text is always the
@@ -830,6 +870,7 @@
       const applyThreshold = async (tokens) => {
         const value = Math.max(0, Math.min(1e10, Number(tokens) || 0));
         state.minTokens = value;
+        resetFilterPages();
         renderThresholdControl(state.data?.options);
         // Remembered in the config so the next launch does not present the full
         // unfiltered lists again.
@@ -1069,16 +1110,20 @@
         finally{if(sequence===state.sequence)showLoading(false);}
       }
       function bind() {
-        $$(".period-button").forEach(button=>button.addEventListener("click",()=>{if(state.period===button.dataset.period)return;state.period=button.dataset.period;$$(".period-button").forEach(b=>b.classList.toggle("active",b===button));const custom=state.period==="custom";$("#custom-range").hidden=!custom;if(custom){const today=new Date(),start=new Date(today);start.setDate(today.getDate()-13);if(!state.customStart){state.customStart=localDate(start);state.customEnd=localDate(today);}$("#custom-start").value=state.customStart;$("#custom-end").value=state.customEnd;}loadView();}));
+        $$(".period-button").forEach(button=>button.addEventListener("click",()=>{if(state.period===button.dataset.period)return;state.period=button.dataset.period;resetFilterPages();$$(".period-button").forEach(b=>b.classList.toggle("active",b===button));const custom=state.period==="custom";$("#custom-range").hidden=!custom;if(custom){const today=new Date(),start=new Date(today);start.setDate(today.getDate()-13);if(!state.customStart){state.customStart=localDate(start);state.customEnd=localDate(today);}$("#custom-start").value=state.customStart;$("#custom-end").value=state.customEnd;}loadView();}));
         $$(".view-tab").forEach(button=>button.addEventListener("click",()=>{if(state.view===button.dataset.view)return;state.view=button.dataset.view;state.search="";state.sortKey="";state.sortDirection="desc";$$(".view-tab").forEach(b=>b.classList.toggle("active",b===button));$("#overview-view").classList.toggle("active",state.view==="overview");$("#detail-view").classList.toggle("active",state.view!=="overview");loadView();}));
         $("#custom-start").addEventListener("change",e=>{state.customStart=e.target.value;loadView();});
         $("#custom-end").addEventListener("change",e=>{state.customEnd=e.target.value;loadView();});
-        $("#provider-filter").addEventListener("change",e=>{state.provider=e.target.value||"";state.model="";$("#model-filter").value="";loadView();});
+        $("#provider-filter").addEventListener("change",e=>{state.provider=e.target.value||"";state.model="";state.modelPage=0;$("#model-filter").value="";loadView();});
         // Deliberately does not touch the provider: the model filter stands on
         // its own, so picking a model must not silently narrow by provider too.
         $("#model-filter").addEventListener("change",e=>{state.model=e.target.value||"";loadView();});
-        $("#source-filter").addEventListener("change",e=>{state.source=e.target.value||"";state.provider="";state.model="";$("#provider-filter").value="";$("#model-filter").value="";loadView();});
-        $("#reset-button").addEventListener("click",()=>{state.provider="";state.model="";state.source="";$("#provider-filter").value="";$("#model-filter").value="";$("#source-filter").value="";loadView();});
+        $("#provider-prev").addEventListener("click",()=>turnFilterPage("provider",-1));
+        $("#provider-next").addEventListener("click",()=>turnFilterPage("provider",1));
+        $("#model-prev").addEventListener("click",()=>turnFilterPage("model",-1));
+        $("#model-next").addEventListener("click",()=>turnFilterPage("model",1));
+        $("#source-filter").addEventListener("change",e=>{state.source=e.target.value||"";state.provider="";state.model="";resetFilterPages();$("#provider-filter").value="";$("#model-filter").value="";loadView();});
+        $("#reset-button").addEventListener("click",()=>{state.provider="";state.model="";state.source="";resetFilterPages();$("#provider-filter").value="";$("#model-filter").value="";$("#source-filter").value="";loadView();});
         $("#threshold-button").addEventListener("click",e=>{e.stopPropagation();const popover=$("#threshold-popover");const open=popover.hidden;popover.hidden=!open;$("#threshold-button").setAttribute("aria-expanded",String(open));});
         document.addEventListener("click",e=>{if(!e.target.closest(".threshold-wrap"))closeThreshold();});
         $("#threshold-presets").addEventListener("click",e=>{const button=e.target.closest("[data-threshold]");if(button)applyThreshold(Number(button.dataset.threshold));});
@@ -1091,7 +1136,7 @@
         $("#add-hidden-model").addEventListener("click",()=>addRuleText("hidden-model-input","hidden_models"));
         $("#add-alias").addEventListener("click",()=>{const source=$("#alias-source-input").value.trim();const target=$("#alias-target-input").value.trim();if(!source||!target){toast("请填写原始名称和归并后的名称");return;}const draft=rulesDraft();draft.aliases=draft.aliases.filter(item=>item[0]!==source);draft.aliases.push([source,target]);$("#alias-source-input").value="";$("#alias-target-input").value="";renderRuleLists();});
         $("#rules-clear").addEventListener("click",()=>{state.rulesDraft={hidden_providers:[],hidden_models:[],aliases:[]};renderRuleLists();});
-        $("#rules-save").addEventListener("click",async()=>{const draft=rulesDraft();try{const result=await callApi("save_model_rules",draft.hidden_providers,draft.hidden_models,Object.fromEntries(draft.aliases));state.modelRules=result.model_rules;closeModelRules();await loadView();toast("模型规则已保存");}catch(error){toast(`保存模型规则失败：${error}`);}});
+        $("#rules-save").addEventListener("click",async()=>{const draft=rulesDraft();try{const result=await callApi("save_model_rules",draft.hidden_providers,draft.hidden_models,Object.fromEntries(draft.aliases));state.modelRules=result.model_rules;resetFilterPages();closeModelRules();await loadView();toast("模型规则已保存");}catch(error){toast(`保存模型规则失败：${error}`);}});
         $("#active-filter-summary").addEventListener("click",()=>{$("#reset-button").click();});
         $("#detail-search").addEventListener("input",e=>{state.search=e.target.value;if(state.data)renderDetail(state.data);});
         $("#drawer-close").addEventListener("click",closeRequestDrawer); $("#drawer-backdrop").addEventListener("click",closeRequestDrawer);

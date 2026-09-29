@@ -1098,10 +1098,11 @@ class MonitorTests(unittest.TestCase):
         """The dropdowns must be scannable by size, and never drop a selection."""
         html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
         # Option text carries the usage, the option value stays a stable key.
-        self.assertIn("function fillSelectPairs(select, allLabel, items, selected)", html)
+        self.assertIn("function paintFilter(which) {", html)
         self.assertIn("${item.value ?? item.name} · ${compactFmt(item.total || 0)}", html)
         self.assertIn("${item.label} · ${compactFmt(item.total || 0)}", html)
         self.assertNotIn("function fillSelect(select, values, selected)", html)
+        self.assertNotIn("function fillSelectPairs(", html)
         # Picking a model must not also narrow the provider.
         self.assertIn(
             '$("#model-filter").addEventListener("change",e=>{state.model=e.target.value||"";loadView();});',
@@ -1144,6 +1145,48 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("if (n === 2) return `M${at(points[0])} L${at(points[1])}`;", html)
         # Dots thin out as the series gets dense instead of crowding the curve.
         self.assertIn("const dotLimit = state.compact ? 18 : 30;", html)
+
+    def test_filter_lists_page_five_at_a_time(self) -> None:
+        """Only the top five show; the arrows reach the rest.
+
+        Paging is a display concern, so the whole list still travels in the
+        response and turning a page never costs another query. A live selection
+        outranks the page number, otherwise a chosen value could sit on a page
+        the user is not looking at and read as unselected.
+        """
+        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("const FILTER_PAGE_SIZE = 5;", html)
+        for which in ("provider", "model"):
+            self.assertIn(f'id="{which}-prev"', html)
+            self.assertIn(f'id="{which}-next"', html)
+            self.assertIn(f'id="{which}-page"', html)
+        self.assertIn('page:"providerPage"', html)
+        self.assertIn('page:"modelPage"', html)
+        self.assertIn("Math.ceil(items.length / FILTER_PAGE_SIZE)", html)
+        # The page is derived from the selection first, then the remembered page,
+        # and always clamped into range.
+        self.assertIn(
+            "let page = index >= 0 ? Math.floor(index / FILTER_PAGE_SIZE) : (Number(state[cfg.page]) || 0);",
+            html,
+        )
+        self.assertIn("page = Math.max(0, Math.min(page, pages - 1));", html)
+        self.assertIn("if (prev) prev.disabled = !many || page === 0;", html)
+        self.assertIn("if (next) next.disabled = !many || page === pages - 1;", html)
+        # Paging must not drop the selection out of the select's value.
+        self.assertIn('select.value = index >= 0 ? state[cfg.selected] : "";', html)
+        # The list is rebuilt from different rows whenever the period, source,
+        # threshold or rules change, so paging restarts at the top entries then.
+        # Narrowing by provider also clears the model, so its page goes with it.
+        self.assertIn("state.period=button.dataset.period;resetFilterPages();", html)
+        self.assertIn("state.source=e.target.value||\"\";state.provider=\"\";state.model=\"\";resetFilterPages();", html)
+        self.assertIn("state.provider=\"\";state.model=\"\";state.source=\"\";resetFilterPages();", html)
+        self.assertIn("state.minTokens = value;\n        resetFilterPages();", html)
+        self.assertIn("state.modelRules=result.model_rules;resetFilterPages();", html)
+        self.assertIn('state.model="";state.modelPage=0;$("#model-filter").value="";', html)
+        self.assertIn("const resetFilterPages = () => { state.providerPage = 0; state.modelPage = 0; };", html)
+        # The two pagers are driven independently.
+        self.assertIn('turnFilterPage("provider",-1)', html)
+        self.assertIn('turnFilterPage("model",1)', html)
 
     def test_source_filter_is_additive_and_selective(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
