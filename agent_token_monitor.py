@@ -39,7 +39,14 @@ SYNC_MUTEX_NAME = "Local\\AgentTokenMonitorDataWriter"
 # The Dashboard runs as a process separate from the tray, so it needs its own
 # guard. Without it, repeated launches pile up windows, each with a WebView2
 # host process, and a stale one can survive as a blank frame.
-DASHBOARD_MUTEX_NAME = "Local\\AgentTokenMonitorDashboard"
+#
+# The name carries the version on purpose. An older build keeps holding the lock
+# for as long as it is alive, and close_stale_dashboards removes only its window,
+# not the process. With a shared name the new build could never find a window to
+# restore, so it deferred to a lock it could never take and never opened at all.
+# Versioning keeps two instances of the same build mutually exclusive while
+# letting an upgraded one take over immediately.
+DASHBOARD_MUTEX_NAME = f"Local\\AgentTokenMonitorDashboard-{VERSION}"
 PROCESS_POLL_SECONDS = 2.0
 # How stale the local index may get before an open Dashboard triggers a sync.
 # Kept well below the tray interval so a visible window tracks live usage.
@@ -4218,7 +4225,14 @@ def run_dashboard(config_path: Path) -> int:
     if guard is None and os.name == "nt":
         if show_existing_dashboard():
             return 0
-        logger.info("Another Dashboard instance holds the lock; deferring to it")
+        # No window to restore, yet the lock is taken. Returning 0 here is what
+        # made a stuck Dashboard look like a failed launch with no output at
+        # all, so say what is holding it and how to get past it.
+        logger.warning("Another Dashboard instance holds the lock; no window to restore")
+        _report_startup_failure(
+            f"另一个 {APP_NAME} 进程正占用 Dashboard 锁，但没有可显示的窗口。\n\n"
+            f"请在任务管理器中结束它，然后重新打开 Dashboard。"
+        )
         return 0
     try:
         import webview  # type: ignore

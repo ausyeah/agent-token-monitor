@@ -1188,6 +1188,26 @@ class MonitorTests(unittest.TestCase):
         self.assertIn('turnFilterPage("provider",-1)', html)
         self.assertIn('turnFilterPage("model",1)', html)
 
+    def test_dashboard_lock_is_versioned_and_never_fails_silently(self) -> None:
+        """An older build must not be able to lock out the upgraded one.
+
+        close_stale_dashboards removes the old window but cannot stop the old
+        process, which keeps holding the lock for as long as it lives. With a
+        shared name the new build found no window to restore, deferred to a lock
+        it could never take, and returned success without ever opening anything.
+        """
+        self.assertIn(module.VERSION, module.DASHBOARD_MUTEX_NAME)
+        self.assertIn("AgentTokenMonitor", module.DASHBOARD_MUTEX_NAME)
+        source = (Path(module.__file__).parent / "agent_token_monitor.py").read_text(encoding="utf-8")
+        # The window title is matched exactly, so the lock has to be scoped the
+        # same way or the two can disagree about who owns the Dashboard.
+        self.assertIn('f"{APP_NAME} {VERSION}"', source)
+        # Deferring with no window to restore must tell the user, not exit 0
+        # quietly.
+        self.assertIn("no window to restore", source)
+        self.assertIn("_report_startup_failure(", source)
+        self.assertNotIn('logger.info("Another Dashboard instance holds the lock; deferring to it")', source)
+
     def test_source_filter_is_additive_and_selective(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = module.Store(Path(temp))
