@@ -11,6 +11,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-9b8b6f.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/ausyeah/agent-token-monitor?label=Release)](https://github.com/ausyeah/agent-token-monitor/releases/latest)
 
+**[解决什么问题](#为什么做这个工具) · [数据来源](#同时统计哪些-agent) · [截图](#截图) · [快速开始](#快速开始) · [技术栈](#技术栈与工程规模)**
+
 </div>
 
 ---
@@ -19,13 +21,27 @@
 
 | Agent | 读取位置 | Token 口径 |
 | --- | --- | --- |
-| **OpenCode** | `~/.local/share/opencode/opencode.db` | 供应商事件中的 token 字段 |
+| **OpenCode** | `~/.local/share/opencode/opencode.db` | 供应商事件中的 token 字段（V1 / V2 两种库结构都支持） |
+| **Codex** | `$CODEX_HOME/sessions/**/rollout-*.jsonl` | `token_count` 事件的整会话累计值，**逐次做差**得到单次请求用量 |
 | **WorkBuddy** | `~/.workbuddy/projects/**/*.jsonl` | `providerData.rawUsage` 原始计数器 |
 | **DeepSeek Harness** | `~/.dsh/sessions/**/*.jsonl.zstd` | `assistant/message` 的 `usage` |
 
-Dashboard 顶部的「来源」下拉可在这三者之间切换；只有一个来源时该控件自动隐藏。
+Dashboard 顶部的「来源」下拉可在这四者之间切换；只有一个来源时该控件自动隐藏。
 
 > WorkBuddy 用积分（Credit）计费且无法换算成 Token 比例，DeepSeek Harness 不记录缓存命中与成本。本工具只呈现各 Agent 真实记录的字段，不做任何推算。
+
+### 增量同步：为什么每个来源的做法不一样
+
+四个来源的日志形态不同，同步策略也就不同——这不是过度设计，是被各自的写入方式逼出来的：
+
+| 来源 | 写入方式 | 增量策略 |
+| --- | --- | --- |
+| OpenCode | SQLite 只读库 | 按事件 id 幂等入库，**OpenCode 未运行时完全不查询源库** |
+| Codex | 追加写入 JSONL | 字节偏移游标 + **额外保存上一次的累计值**，否则游标后第一条事件会被记成整个会话的总量 |
+| WorkBuddy | 追加写入 JSONL | 按文件大小维护游标，只读新增；文件被截断或改写时自动从头重读 |
+| DeepSeek Harness | zstd 压缩且**原地重写** | 不用字节偏移，改按 `会话 id + 事件序号` 幂等入库 |
+
+游标与用量事件在**同一事务内提交**，重复同步不会产生重复记录。
 
 ## 为什么做这个工具？
 
@@ -240,12 +256,14 @@ AgentTokenMonitor.exe uninstall
 %USERPROFILE%\\.dsh\\sessions\\**\\session.v*.jsonl.zstd
 ```
 
-程序会先检测 `OpenCode.exe`、`opencode.exe`、`opencode-cli.exe`、`WorkBuddy.exe` 或 `DeepSeek Harness.exe` 是否运行。只要没有任何一个在运行，就不会查询任何源数据，也不会调用 CLI 去探测路径。
+程序会先检测 `OpenCode.exe`、`opencode.exe`、`opencode-cli.exe`、`codex.exe`、`WorkBuddy.exe` 或 `DeepSeek Harness.exe` 是否运行。只要没有任何一个在运行，就不会查询任何源数据，也不会调用 CLI 去探测路径。
 
 配置项：
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
+| `codex_enabled` | `true` | 是否读取 Codex 本地数据 |
+| `codex_root` | 自动探测 | Codex 数据目录，跟随 `CODEX_HOME`，留空则依次查找 `~/.codex` 与 `%APPDATA%\codex` |
 | `workbuddy_enabled` | `true` | 是否读取 WorkBuddy 本地数据 |
 | `workbuddy_root` | 自动探测 | WorkBuddy 数据目录，留空则自动查找 `~/.workbuddy` |
 | `dsh_enabled` | `true` | 是否读取 DeepSeek Harness 本地数据 |
@@ -287,6 +305,25 @@ Dashboard 曾经可能只显示一个黑窗口而没有任何提示。现在以�
 - `custom`：完全自定义，不自动回退官方目录
 
 配置示例见 [`config.example.json`](config.example.json)。
+
+## 技术栈与工程规模
+
+Python 3.13 · SQLite · Edge WebView2（pywebview）· PyInstaller 单文件打包 · Windows 托盘（pystray + winotify）。
+
+| 层 | 选型 |
+|---|---|
+| 后端与同步 | 单文件 `agent_token_monitor.py`（约 3700 行），SQLite 索引 |
+| 界面 | `dashboard.html`（约 990 行，响应式，图表与交互零第三方库） |
+| 价格数据 | [model.dev](https://models.dev/) 供应商价格与上下文阶梯 |
+| 打包 | PyInstaller → 单文件 EXE |
+| 依赖 | 全部为托盘 / 通知 / 压缩 / WebView 所需，`zstandard` 用于 DeepSeek 会话日志 |
+
+| 指标 | 数值 |
+|---|---|
+| 后端 Python | 约 3700 行 |
+| Dashboard | 约 990 行 HTML/CSS/JS |
+| 单元测试 | **43 个测试函数 / 1265 行** |
+| 数据来源 | 4 个 Agent（OpenCode V1+V2、WorkBuddy、DeepSeek Harness、Codex） |
 
 ## 项目结构
 
