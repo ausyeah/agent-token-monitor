@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -1291,100 +1292,255 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(module.interpolate_color(0, 100_000_000)[:3], (34, 178, 95))
         self.assertEqual(module.interpolate_color(100_000_000, 100_000_000)[:3], (220, 38, 38))
 
-    def test_daily_trend_is_grained_by_day_and_follows_the_period(self) -> None:
-        """The overview carries a second, always day-grained series.
+    def test_daily_trend_buckets_are_whole_24_hours(self) -> None:
+        """Every point on the daily trend is a full 24 hours, newest first among equals.
 
-        It covers the same window as the period that was picked, so shortening
-        the period shortens the daily trend too, and it respects the provider and
-        model filters because it is built from the same where-clause.
+        Calendar days are the obvious bucket and the wrong one. The day in
+        progress is short, so it sits beside complete days and reads as a drop in
+        usage that never happened. The buckets here are counted back from the end
+        of the window, which makes the newest point the trailing 24 hours and
+        every other point the same length.
         """
+        day = 86_400_000
         with tempfile.TemporaryDirectory() as temp:
             store = module.Store(Path(temp))
             try:
-                day = dt.date(2026, 3, 10)
-                for offset, tokens in ((2, 300), (1, 700), (0, 500)):
-                    when = int(dt.datetime.combine(day - dt.timedelta(days=offset), dt.time(9, 30)).timestamp() * 1000)
+                # The start of the trailing 24 hours, which is also the anchor the
+                # buckets are aligned to.
+                anchor = int(dt.datetime(2026, 3, 10, 15, 0).timestamp() * 1000)
+                for step in range(12):
+                    when = anchor + step * 6 * 3_600_000
                     store.upsert_event(module.UsageRecord(
-                        message_id=f"a{offset}", source="v2", source_rank=2, session_id="s",
+                        message_id=f"h{step}", source="v2", source_rank=2, session_id="s",
                         project_id="p", project_name="p", project_path="p",
                         provider_id="alpha", model_id="m1", variant="high", agent="",
                         event_time=when, source_created=when, source_updated=when,
-                        input_tokens=tokens, output_tokens=0, reasoning_tokens=0,
-                        cache_read_tokens=0, cache_write_tokens=0, cost=0.0,
+                        input_tokens=100, output_tokens=0, reasoning_tokens=0,
+                        cache_read_tokens=0, cache_write_tokens=0, cost=2.0,
                     ))
-                middle = int(dt.datetime.combine(day - dt.timedelta(days=1), dt.time(14, 0)).timestamp() * 1000)
-                store.upsert_event(module.UsageRecord(
-                    message_id="b1", source="v2", source_rank=2, session_id="s",
-                    project_id="p", project_name="p", project_path="p",
-                    provider_id="bravo", model_id="m2", variant="high", agent="",
-                    event_time=middle, source_created=middle, source_updated=middle,
-                    input_tokens=100, output_tokens=0, reasoning_tokens=0,
-                    cache_read_tokens=0, cache_write_tokens=0, cost=0.0,
-                ))
                 store.conn.commit()
-                lo = int(dt.datetime.combine(day - dt.timedelta(days=3), dt.time(0, 0)).timestamp() * 1000)
-                hi = int(dt.datetime.combine(day, dt.time(23, 59)).timestamp() * 1000)
+                end = anchor + 3 * day
 
-                daily = store.analytics(lo, hi, granularity="day", event_limit=0)["trend"]
-                # A day with no usage is kept, so the line has no gap to jump over.
-                self.assertEqual([row["bucket"] for row in daily],
-                                 ["2026-03-07", "2026-03-08", "2026-03-09", "2026-03-10"])
-                self.assertEqual([row["total_with_cache"] for row in daily], [0, 300, 800, 500])
-                # Daily and hourly must agree, they only differ in the buckets.
-                hourly = store.analytics(lo, hi, granularity="hour", event_limit=0)["trend"]
+                rows = store.rolling_24h_trend(end - 3 * day, end)
+                aligned, steps = store._rolling_bucket_bounds(end - 3 * day, end)
+                self.assertEqual(len(rows), steps)
+                # Four events every six hours, so a whole bucket holds four and a
+                # partial one would hold fewer.
+                self.assertEqual([row["requests"] for row in rows], [4, 4, 4])
+                # A bucket is named for the day it ends on, and the first bucket
+                # opens exactly on the aligned start.
+                self.assertEqual([row["bucket"] for row in rows],
+                                 ["2026-03-11", "2026-03-12", "2026-03-13"])
+                # The same events read as calendar days come out uneven, which is
+                # the artefact this series exists to remove.
+                by_day: dict[str, int] = {}
+                for step in range(12):
+                    key = dt.datetime.fromtimestamp(
+                        (anchor + step * 6 * 3_600_000) / 1000).astimezone().strftime("%Y-%m-%d")
+                    by_day[key] = by_day.get(key, 0) + 1
+                self.assertEqual([by_day[key] for key in sorted(by_day)], [2, 4, 4, 2])
+
+                # A window that is not a whole number of days is still filled with
+                # whole buckets, including the first one. Bounding the query by the
+                # unaligned start instead would leave the earliest bucket short.
+                rows = store.rolling_24h_trend(end - int(1.5 * day), end)
+                self.assertEqual([row["requests"] for row in rows], [4, 4])
+                # Starting the window away from midnight changes nothing.
+                self.assertEqual([row["requests"] for row in store.rolling_24h_trend(anchor, anchor + 3 * day)],
+                                 [4, 4, 4])
+                # Costs are keyed on the buckets of the window they are costing,
+                # so a row and the events in it agree, and an event from before the
+                # window belongs to no bucket at all.
+                for start, window in ((end - 3 * day, None), (end - int(1.5 * day), None)):
+                    start_aligned, _ = store._rolling_bucket_bounds(start, end)
+                    series = store.rolling_24h_trend(start, end)
+                    self.assertEqual(store.rolling_bucket_label(start, start_aligned), series[0]["bucket"])
+                    self.assertEqual(store.rolling_bucket_label(start - day, start_aligned), "")
+                    # Every event in the window lands in a bucket the series has.
+                    inside = [store.rolling_bucket_label(row["event_time"], start_aligned)
+                              for row in store.costing_rows(start_aligned, end)]
+                    self.assertTrue(all(label in {row["bucket"] for row in series} for label in inside))
+
+                # The filters reach it, and an empty window still gives a point.
                 self.assertEqual(
-                    sum(row["total_with_cache"] for row in daily),
-                    sum(row["total_with_cache"] for row in hourly),
+                    [row["requests"] for row in store.rolling_24h_trend(anchor, anchor + day, provider_id="nobody")],
+                    [0],
                 )
-                # A shorter window yields a shorter series.
-                self.assertEqual(
-                    [row["bucket"] for row in store.analytics(
-                        int(dt.datetime.combine(day, dt.time(0, 0)).timestamp() * 1000), hi,
-                        granularity="day", event_limit=0)["trend"]],
-                    ["2026-03-10"],
-                )
-                # The filters reach it too.
-                self.assertEqual(
-                    [row["total_with_cache"] for row in store.analytics(
-                        lo, hi, provider_id="alpha", granularity="day", event_limit=0)["trend"]],
-                    [0, 300, 700, 500],
-                )
-                self.assertEqual(
-                    [row["total_with_cache"] for row in store.analytics(
-                        lo, hi, model_key=("bravo", "m2", "high"), granularity="day", event_limit=0)["trend"]],
-                    [0, 0, 100, 0],
-                )
+                self.assertEqual(len(store.rolling_24h_trend(anchor, anchor)), 1)
             finally:
                 store.close()
+
+    def test_daily_trend_never_shows_less_than_a_week(self) -> None:
+        """A // comment must not sit in front of code on the same line.
+
+        One did, and it ate the rest of the line: the caption was never set, the
+        daily chart was never drawn, and two closing braces went with it. The
+        file still parsed as far as the tests that grepped for the caption text,
+        because the text was inside the comment. Only a syntax check noticed.
+        """
+        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+        script = html.partition("<script>")[2].rpartition("</script>")[0]
+        self.assertTrue(script, "the inline script could not be extracted")
+        offenders = [
+            (number, line.strip()[:90])
+            for number, line in enumerate(script.splitlines(), 1)
+            if "//" in line and not line.strip().startswith("//")
+        ]
+        self.assertEqual(offenders, [], f"a // comment is eating code on these lines: {offenders}")
+
+    def test_daily_trend_never_shows_less_than_a_week(self) -> None:
+        """A one-day period still shows a week of days.
+
+        The daily trend answers how the last few days have gone, so a single day
+        would be one dot. The floor is measured back from the end of the period,
+        so a custom range keeps showing the week leading up to the day it ends
+        on, and a longer period is left alone.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "AgentTokenMonitor"
+            root.mkdir(parents=True)
+            config = dict(module.DEFAULT_CONFIG)
+            # No catalogue and no custom rates, so an event falls back to the
+            # cost recorded on the event itself. That keeps the assertion about
+            # the widened window independent of any pricing data.
+            config.update({
+                "opencode_db": str(root / "empty.db"),
+                "use_model_dev_pricing": False,
+                "pricing_mode": "custom",
+                "custom_pricing": {"default": {}, "models": []},
+            })
+            sqlite3.connect(root / "empty.db").close()
+            (root / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+            today = dt.datetime.now().astimezone().replace(hour=10, minute=0, second=0, microsecond=0)
+            store = module.Store(root)
+            try:
+                # One event per day for the last ten days, each carrying a cost.
+                for offset in range(10):
+                    when = int((today - dt.timedelta(days=offset)).timestamp() * 1000)
+                    store.upsert_event(module.UsageRecord(
+                        message_id=f"d{offset}", source="v2", source_rank=2, session_id="s",
+                        project_id="p", project_name="p", project_path="p",
+                        provider_id="alpha", model_id="m1", variant="high", agent="",
+                        event_time=when, source_created=when, source_updated=when,
+                        input_tokens=1000, output_tokens=0, reasoning_tokens=0,
+                        cache_read_tokens=0, cache_write_tokens=0, cost=1.5,
+                    ))
+                store.conn.commit()
+            finally:
+                store.close()
+
+            original_target = module.app_data_dir
+            module.app_data_dir = lambda: root
+            try:
+                api = module.DashboardApi(root / "config.json")
+                today_data = api.get_dashboard(period="today", view="overview")
+            finally:
+                module.app_data_dir = original_target
+
+            self.assertEqual(len(today_data["daily_trend"]), module.DAILY_TREND_MIN_DAYS)
+            # The series carries its own cost, which only works if the pricing
+            # pass covered the days it reaches back into.
+            self.assertTrue(all(row["total_cost"] > 0 for row in today_data["daily_trend"]))
+            # Reaching back must not widen the period the series sits beside.
+            self.assertEqual(today_data["summary"]["requests"], 1)
+            self.assertEqual(today_data["summary"]["total_with_cache"], 1000)
+            self.assertEqual(today_data["summary"]["total_cost"], 1.5)
+            self.assertEqual(len(today_data["trend"]), 24)  # hourly, one day
+            self.assertEqual(today_data["granularity"], "hour")
+
+    def test_longer_periods_are_not_widened(self) -> None:
+        """Thirty days stays thirty days; the floor only ever extends a short period."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "AgentTokenMonitor"
+            root.mkdir(parents=True)
+            config = dict(module.DEFAULT_CONFIG)
+            config.update({
+                "opencode_db": str(root / "empty.db"),
+                "use_model_dev_pricing": False,
+                "pricing_mode": "custom",
+                "custom_pricing": {"default": {}, "models": []},
+            })
+            sqlite3.connect(root / "empty.db").close()
+            (root / "config.json").write_text(json.dumps(config), encoding="utf-8")
+            # A month of usage, one event per day.
+            store = module.Store(root)
+            try:
+                today = dt.datetime.now().astimezone().replace(hour=10, minute=0, second=0, microsecond=0)
+                for offset in range(31):
+                    when = int((today - dt.timedelta(days=offset)).timestamp() * 1000)
+                    store.upsert_event(module.UsageRecord(
+                        message_id=f"d{offset}", source="v2", source_rank=2, session_id="s",
+                        project_id="p", project_name="p", project_path="p",
+                        provider_id="alpha", model_id="m1", variant="high", agent="",
+                        event_time=when, source_created=when, source_updated=when,
+                        input_tokens=1000, output_tokens=0, reasoning_tokens=0,
+                        cache_read_tokens=0, cache_write_tokens=0, cost=1.5,
+                    ))
+                store.conn.commit()
+            finally:
+                store.close()
+
+            original_target = module.app_data_dir
+            module.app_data_dir = lambda: root
+            try:
+                api = module.DashboardApi(root / "config.json")
+                thirty = api.get_dashboard(period="30d", view="overview")
+                seven = api.get_dashboard(period="7d", view="overview")
+                week = api.get_dashboard(period="custom", custom_start="2026-09-01", custom_end="2026-09-03",
+                                         view="overview")
+            finally:
+                module.app_data_dir = original_target
+
+            # Thirty days is still thirty points, the week floor is still seven,
+            # and a short custom range reaches back to a week.
+            self.assertEqual(len(thirty["daily_trend"]), 30)
+            self.assertEqual(len(seven["daily_trend"]), 7)
+            self.assertEqual(len(week["daily_trend"]), module.DAILY_TREND_MIN_DAYS)
+            # A custom range that ends in the past is not pushed forward to now:
+            # the newest bucket ends the day after the range does, because a
+            # bucket is named for the day it finishes in.
+            self.assertEqual(week["daily_trend"][-1]["bucket"], "2026-09-04")
 
     def test_daily_trend_costs_ride_the_existing_pricing_pass(self) -> None:
         """The daily rows must carry the same cost fields as the trend beside them.
 
-        They are filled during the pass that is already made for the period, so
-        no second scan of the usage events is needed for them.
+        They are filled from the rows the pass already has in hand, and the bucket
+        a row is costed into comes from the caller, so the two cannot disagree
+        about where a bucket begins.
         """
         with tempfile.TemporaryDirectory() as temp:
             store = module.Store(Path(temp))
             try:
-                when = int(dt.datetime.combine(dt.date(2026, 3, 10), dt.time(9, 30)).timestamp() * 1000)
-                store.upsert_event(module.UsageRecord(
-                    message_id="a", source="v2", source_rank=2, session_id="s",
-                    project_id="p", project_name="p", project_path="p",
-                    provider_id="alpha", model_id="m1", variant="high", agent="",
-                    event_time=when, source_created=when, source_updated=when,
-                    input_tokens=1000, output_tokens=0, reasoning_tokens=0,
-                    cache_read_tokens=0, cache_write_tokens=0, cost=0.0,
-                ))
+                anchor = int(dt.datetime(2026, 3, 10, 15, 0).timestamp() * 1000)
+                for step in range(6):
+                    when = anchor + step * 4 * 3_600_000
+                    store.upsert_event(module.UsageRecord(
+                        message_id=f"e{step}", source="v2", source_rank=2, session_id="s",
+                        project_id="p", project_name="p", project_path="p",
+                        provider_id="alpha", model_id="m1", variant="high", agent="",
+                        event_time=when, source_created=when, source_updated=when,
+                        input_tokens=1000, output_tokens=0, reasoning_tokens=0,
+                        cache_read_tokens=0, cache_write_tokens=0, cost=0.0,
+                    ))
                 store.conn.commit()
-                lo, hi = when - 86_400_000, when + 86_400_000
-                analytics = store.analytics(lo, hi, granularity="hour", event_limit=0)
-                daily_rows = list(store.analytics(lo, hi, granularity="day", event_limit=0)["trend"])
-                module.attach_model_dev_costs(analytics, store.costing_rows(lo, hi), {}, {}, daily_rows)
+                end = anchor + 2 * 86_400_000
+                rows = store.costing_rows(anchor, end)
+                analytics = store.analytics(anchor, end, granularity="hour", event_limit=0)
+                daily_rows = store.rolling_24h_trend(anchor, end)
+                bucket_of = lambda event_ms: store.rolling_bucket_label(event_ms, anchor)
+                module.attach_model_dev_costs(
+                    analytics, rows, {}, {}, daily_rows, bucket_of,
+                )
                 fields = lambda row: sorted(k for k in row if "cost" in k or "pricing" in k)
                 self.assertEqual(fields(daily_rows[0]), fields(analytics["trend"][0]))
-                # Omitting the series leaves the previous behaviour untouched.
-                plain = store.analytics(lo, hi, granularity="hour", event_limit=0)
-                module.attach_model_dev_costs(plain, store.costing_rows(lo, hi), {}, {})
+                # A bucket with no events in it still reports a cost, at zero,
+                # rather than being left without the fields.
+                self.assertTrue(all(row["total_cost"] == 0.0 for row in daily_rows))
+                self.assertTrue(all("total_cost" in row for row in daily_rows))
+                # Passing no series leaves the previous behaviour untouched.
+                plain = store.analytics(anchor, end, granularity="hour", event_limit=0)
+                module.attach_model_dev_costs(plain, rows, {}, {})
                 self.assertEqual(fields(plain["trend"][0]), fields(analytics["trend"][0]))
             finally:
                 store.close()
@@ -1422,6 +1578,18 @@ class MonitorTests(unittest.TestCase):
         self.assertIn('id="daily-trend-svg"', html)
         self.assertIn('id="daily-tooltip"', html)
         self.assertIn(".chart-wrap.daily-chart { height: 224px; }", html)
+        # An unsized svg falls back to the 300x150 default while its viewBox is
+        # measured from the full card, so the drawing gets clipped. Every chart
+        # svg has to be in that rule, not just the first one that existed.
+        self.assertIn(
+            "#trend-svg, #daily-trend-svg, #compact-trend-svg { width: 100%; height: 100%; display: block; overflow: hidden; }",
+            html,
+        )
+        # No other chart svg may be left out of it.
+        rule, _, _ = html.partition("{ width: 100%; height: 100%; display: block; overflow: hidden; }")
+        rule = rule[rule.rfind("}") + 1:]
+        for svg_id in re.findall(r'<svg id="([\w-]+)"', html):
+            self.assertIn(f"#{svg_id}", rule, f"{svg_id} has no width/height rule")
         # Same card and head classes as the trend above it.
         self.assertRegex(
             html,
@@ -1431,8 +1599,10 @@ class MonitorTests(unittest.TestCase):
         # Rendered from the series the backend sends, with its own tooltip.
         self.assertIn('drawChart($("#daily-trend-svg"), $("#daily-tooltip"), daily)', html)
         self.assertIn("const daily=data.daily_trend||[]", html)
-        # The caption states how many days are on it.
-        self.assertIn("按天 · ${days?`共 ${days} 天`", html)
+        # The caption states that a point is 24 hours rather than a calendar day,
+        # which is what makes the points comparable with one another.
+        self.assertIn("const daily=data.daily_trend||[]", html)
+        self.assertIn('setText("#daily-trend-caption", `每点 24 小时 · 共 ${days?days:0} 天 · 指标同上方`);', html)
         # The card lives in the full overview, which the compact layout hides.
         self.assertIn('body[data-layout="compact"] .full-overview { display: none; }', html)
 

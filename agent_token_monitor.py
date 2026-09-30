@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image, ImageDraw
 
@@ -33,6 +33,35 @@ VERSION = "4.2.0"
 # both filter dropdowns are all visible without scrolling on a 1080p display.
 DEFAULT_WINDOW_WIDTH = 985
 DEFAULT_WINDOW_HEIGHT = 975
+# The daily trend never shows less than this many days, however short the
+# selected period is. One day is a single dot, which is not a trend.
+DAILY_TREND_MIN_DAYS = 7
+ROLLING_TREND_STEP_MS = 86_400_000
+# One set of token totals, shared by every grouped query, so the trend, the
+# rankings and the summary cannot drift apart on what counts as a request.
+USAGE_AGGREGATE_SQL = """
+    COUNT(*) AS requests,
+    COALESCE(SUM(input_tokens),0) AS input_tokens,
+    COALESCE(SUM(output_tokens),0) AS output_tokens,
+    COALESCE(SUM(reasoning_tokens),0) AS reasoning_tokens,
+    COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
+    COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens,
+    COALESCE(SUM(total_with_cache),0) AS total_with_cache,
+    COALESCE(SUM(total_without_cache_read),0) AS total_without_cache_read,
+    COALESCE(SUM(cost),0) AS cost
+"""
+# A bucket with no usage still gets every column, at zero.
+EMPTY_AGGREGATE_ROW = {
+    "requests": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "reasoning_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "total_with_cache": 0,
+    "total_without_cache_read": 0,
+    "cost": 0.0,
+}
 MUTEX_NAME = "Local\\AgentTokenMonitorSingleton"
 SYNC_MUTEX_NAME = "Local\\AgentTokenMonitorDataWriter"
 # The Dashboard runs as a process separate from the tray, so it needs its own
@@ -962,15 +991,7 @@ class Store:
             params.append(end_ms)
         row = self.conn.execute(
             f"""
-            SELECT COUNT(*) AS requests,
-                   COALESCE(SUM(input_tokens),0) AS input_tokens,
-                   COALESCE(SUM(output_tokens),0) AS output_tokens,
-                   COALESCE(SUM(reasoning_tokens),0) AS reasoning_tokens,
-                   COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
-                   COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens,
-                   COALESCE(SUM(total_with_cache),0) AS total_with_cache,
-                   COALESCE(SUM(total_without_cache_read),0) AS total_without_cache_read,
-                   COALESCE(SUM(cost),0) AS cost
+            SELECT {USAGE_AGGREGATE_SQL}
             FROM usage_events WHERE {where}
             """,
             params,
@@ -1114,21 +1135,87 @@ class Store:
             bucket = cursor_dt.strftime("%Y-%m-%d %H:00" if granularity == "hour" else "%Y-%m-%d")
             row = by_bucket.get(bucket)
             if row is None:
-                row = {
-                    "bucket": bucket,
-                    "requests": 0,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "reasoning_tokens": 0,
-                    "cache_read_tokens": 0,
-                    "cache_write_tokens": 0,
-                    "total_with_cache": 0,
-                    "total_without_cache_read": 0,
-                    "cost": 0.0,
-                }
+                row = {"bucket": bucket, **EMPTY_AGGREGATE_ROW}
             result.append(row)
             cursor_dt += step
         return result
+
+    @staticmethod
+    def _rolling_bucket_bounds(start_ms: int, end_ms: int) -> tuple[int, int]:
+        """Align a window to whole 24 hour steps ending at end_ms.
+
+        Counting back from the end rather than forward from the start is what
+        makes the last bucket the trailing 24 hours, complete, instead of a day
+        that started at midnight and got cut off partway through.
+        """
+        span = end_ms - start_ms
+        # An exact multiple needs no extra bucket: two days of window is two
+        # buckets, not three. A window that is not a whole number of days still
+        # rounds up, so the trailing 24 hours is never cut short.
+        steps = max(1, -(-span // ROLLING_TREND_STEP_MS))
+        return end_ms - steps * ROLLING_TREND_STEP_MS, steps
+
+    def rolling_24h_trend(
+        self,
+        start_ms: int,
+        end_ms: int,
+        *,
+        provider_id: str | None = None,
+        model_key: tuple[str, str, str] | None = None,
+        source: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """A day-grained series where every point is a full 24 hours.
+
+        Calendar days are the obvious choice and the wrong one here: the day in
+        progress is short, so it sits beside several complete days and reads as
+        a drop in usage that never happened. Each bucket here spans exactly 24
+        hours, and the series ends at the moment of the query, so the points are
+        comparable with one another.
+
+        Buckets are labelled with the date they end on, which is the day the
+        trailing 24 hours mostly fall in.
+        """
+        aligned_start, steps = self._rolling_bucket_bounds(start_ms, end_ms)
+        # The query is bounded by the aligned start, not the requested one. They
+        # differ whenever the window is not a whole number of days, and bounding
+        # by the requested start would leave the earliest bucket holding only the
+        # part of it that falls inside the window: a short day at the front, the
+        # very thing this series exists to avoid. Reaching back a few hours
+        # further costs nothing and keeps every bucket equal.
+        where, params = self._analytics_where(aligned_start, end_ms, provider_id, model_key, None, source)
+        rows = self.conn.execute(
+            f"""
+            SELECT CAST((event_time - ?) / {ROLLING_TREND_STEP_MS} AS INTEGER) AS slot,{USAGE_AGGREGATE_SQL}
+            FROM usage_events WHERE {where}
+            GROUP BY slot ORDER BY slot
+            """,
+            [aligned_start, *params],
+        ).fetchall()
+        by_slot = {safe_int(row["slot"]): dict(row) for row in rows}
+        result: list[dict[str, Any]] = []
+        for slot in range(steps):
+            # The bucket covers [aligned_start + slot*step, +step), so it is named
+            # for the day it finishes in.
+            label = datetime.fromtimestamp(
+                (aligned_start + (slot + 1) * ROLLING_TREND_STEP_MS) / 1000
+            ).astimezone().strftime("%Y-%m-%d")
+            row = by_slot.get(slot)
+            if row is None:
+                row = {"bucket": label, **EMPTY_AGGREGATE_ROW}
+            else:
+                row["bucket"] = label
+            result.append(row)
+        return result
+
+    @staticmethod
+    def rolling_bucket_label(event_ms: int, aligned_start_ms: int) -> str:
+        """The rolling bucket an event belongs to, for costing it on the way past."""
+        slot = (safe_int(event_ms) - aligned_start_ms) // ROLLING_TREND_STEP_MS
+        if slot < 0:
+            return ""
+        return datetime.fromtimestamp(
+            (aligned_start_ms + (slot + 1) * ROLLING_TREND_STEP_MS) / 1000
+        ).astimezone().strftime("%Y-%m-%d")
 
     def analytics(
         self,
@@ -1152,17 +1239,7 @@ class Store:
                 start_ms = int(datetime.fromtimestamp(end_ms / 1000).astimezone().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
                 where, params = self._analytics_where(start_ms, end_ms, provider_id, model_key, project_name, source)
 
-        aggregate = """
-            COUNT(*) AS requests,
-            COALESCE(SUM(input_tokens),0) AS input_tokens,
-            COALESCE(SUM(output_tokens),0) AS output_tokens,
-            COALESCE(SUM(reasoning_tokens),0) AS reasoning_tokens,
-            COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
-            COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens,
-            COALESCE(SUM(total_with_cache),0) AS total_with_cache,
-            COALESCE(SUM(total_without_cache_read),0) AS total_without_cache_read,
-            COALESCE(SUM(cost),0) AS cost
-        """
+        aggregate = USAGE_AGGREGATE_SQL
         summary = dict(self.conn.execute(f"SELECT {aggregate} FROM usage_events WHERE {where}", params).fetchone())
         bucket_expression = (
             "strftime('%Y-%m-%d %H:00',event_time / 1000, 'unixepoch', 'localtime')"
@@ -3349,11 +3426,23 @@ def _finish_cost(bucket: dict[str, Any]) -> dict[str, Any]:
     return bucket
 
 
-def attach_model_dev_costs(analytics: dict[str, Any], rows: list[dict[str, Any]], catalog: dict[str, Any], pricing_config: dict[str, Any] | None = None, daily_trend: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    # daily_trend is an optional day-bucketed series for the same rows. It rides
-    # along in this pass so the prices are only worked out once, rather than
-    # rescanning the period for a second set of totals.
-    daily_buckets: dict[str, dict[str, Any]] = {str(row["bucket"]): _empty_cost_bucket() for row in (daily_trend or [])}
+def attach_model_dev_costs(
+    analytics: dict[str, Any],
+    rows: list[dict[str, Any]],
+    catalog: dict[str, Any],
+    pricing_config: dict[str, Any] | None = None,
+    daily_trend: list[dict[str, Any]] | None = None,
+    daily_bucket_of: Callable[[int], str] | None = None,
+) -> dict[str, Any]:
+    # daily_trend is an optional second series over the same rows, bucketed by
+    # daily_bucket_of rather than by the period's granularity. It rides along in
+    # this pass so the prices are only worked out once, instead of rescanning the
+    # events for a second set of totals.
+    daily_buckets: dict[str, dict[str, Any]] = (
+        {str(row["bucket"]): _empty_cost_bucket() for row in daily_trend}
+        if daily_trend and daily_bucket_of
+        else {}
+    )
     summary = _empty_cost_bucket()
     trend: dict[str, dict[str, Any]] = {str(row["bucket"]): _empty_cost_bucket() for row in analytics["trend"]}
     providers: dict[str, dict[str, Any]] = {str(row["name"]): _empty_cost_bucket() for row in analytics["providers"]}
@@ -3374,7 +3463,7 @@ def attach_model_dev_costs(analytics: dict[str, Any], rows: list[dict[str, Any]]
         if bucket in trend:
             _merge_cost(trend[bucket], row, calculated)
         if daily_buckets:
-            day = event_dt.strftime("%Y-%m-%d")
+            day = daily_bucket_of(safe_int(row["event_time"]))
             if day in daily_buckets:
                 _merge_cost(daily_buckets[day], row, calculated)
         provider = str(row["provider_id"] or "")
@@ -3488,23 +3577,58 @@ class DashboardApi:
                 pricing_catalog, pricing_status = catalog.load()
             elif selected_pricing_mode == "custom":
                 pricing_status = {"source": "custom", "state": "enabled", "updated_at": now_ms()}
-            costing_rows = store.costing_rows(start_ms, end_ms, provider or None, model_key, source=source or None)
-            # The overview carries a second, always day-grained series covering
-            # the same period, so picking a shorter period narrows the daily
-            # trend too. analytics is reused rather than given a lean twin: it
-            # keeps the filter semantics in one place, and the extra grouping is
-            # cheap next to the scan the cost pass needs anyway.
-            daily = store.analytics(
-                start_ms,
-                end_ms,
+            # The overview carries a second series where every point is a whole 24
+            # hours, ending now. Calendar days are the obvious bucket and the
+            # wrong one: the day in progress is short, so it sits beside complete
+            # days and reads as a drop in usage that never happened. Counting back
+            # from the current moment makes the newest point the trailing 24 hours
+            # and every point comparable with it.
+            #
+            # It also never shows less than a week, since one day is a single dot
+            # rather than a trend, and it stops at now so it never plots the future
+            # even when the chosen period runs to the end of today.
+            daily_end_ms = min(end_ms, now_ms())
+            period_start_ms, _, _ = self._period_bounds(period, custom_start, custom_end)
+            requested_start_ms = period_start_ms if period_start_ms > 0 else daily_end_ms
+            daily_start_ms = min(requested_start_ms, daily_end_ms - DAILY_TREND_MIN_DAYS * ROLLING_TREND_STEP_MS)
+            aligned_start_ms, _ = store._rolling_bucket_bounds(daily_start_ms, daily_end_ms)
+            daily_trend = store.rolling_24h_trend(
+                aligned_start_ms,
+                daily_end_ms,
                 provider_id=provider or None,
                 model_key=model_key,
-                granularity="day",
-                event_limit=0,
                 source=source or None,
             )
-            daily_trend = list(daily["trend"])
-            attach_model_dev_costs(analytics, costing_rows, pricing_catalog, config, daily_trend)
+            # The 24 hour series usually reaches further back than the period it
+            # sits beside, so the scan is widened to cover both and then split.
+            # The split mirrors the SQL exactly: event_time >= start and < end.
+            # Widening by a few steps over a long period costs nothing, because
+            # there are no events in the part of the period after now.
+            costing_rows = store.costing_rows(aligned_start_ms, end_ms, provider or None, model_key, source=source or None)
+            period_rows = [row for row in costing_rows if start_ms <= safe_int(row["event_time"]) < end_ms]
+            bucket_of = lambda event_ms: store.rolling_bucket_label(event_ms, aligned_start_ms)
+            # Separate passes for the period and for the 24 hour series, because
+            # the period's summary must not pick up the days the series reaches
+            # back into, and the two are keyed on different buckets. The pricing
+            # itself is pure arithmetic over rows already in hand, and the
+            # overlap is only as large as the part of the period before now.
+            attach_model_dev_costs(analytics, period_rows, pricing_catalog, config)
+            attach_model_dev_costs(
+                {
+                    "summary": _empty_cost_bucket(),
+                    "trend": [],
+                    "providers": [],
+                    "models": [],
+                    "projects": [],
+                    "events": [],
+                    "granularity": "day",
+                },
+                costing_rows,
+                pricing_catalog,
+                config,
+                daily_trend,
+                bucket_of,
+            )
             pricing_status["enabled"] = pricing_enabled or selected_pricing_mode == "custom"
             pricing_status["mode"] = selected_pricing_mode
             pricing_status["multiplier"] = pricing_multiplier(config) if selected_pricing_mode == "multiplier" else 1.0
