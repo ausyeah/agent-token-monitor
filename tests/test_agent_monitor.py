@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import sqlite3
@@ -1289,6 +1290,151 @@ class MonitorTests(unittest.TestCase):
     def test_interpolation(self) -> None:
         self.assertEqual(module.interpolate_color(0, 100_000_000)[:3], (34, 178, 95))
         self.assertEqual(module.interpolate_color(100_000_000, 100_000_000)[:3], (220, 38, 38))
+
+    def test_daily_trend_is_grained_by_day_and_follows_the_period(self) -> None:
+        """The overview carries a second, always day-grained series.
+
+        It covers the same window as the period that was picked, so shortening
+        the period shortens the daily trend too, and it respects the provider and
+        model filters because it is built from the same where-clause.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            store = module.Store(Path(temp))
+            try:
+                day = dt.date(2026, 3, 10)
+                for offset, tokens in ((2, 300), (1, 700), (0, 500)):
+                    when = int(dt.datetime.combine(day - dt.timedelta(days=offset), dt.time(9, 30)).timestamp() * 1000)
+                    store.upsert_event(module.UsageRecord(
+                        message_id=f"a{offset}", source="v2", source_rank=2, session_id="s",
+                        project_id="p", project_name="p", project_path="p",
+                        provider_id="alpha", model_id="m1", variant="high", agent="",
+                        event_time=when, source_created=when, source_updated=when,
+                        input_tokens=tokens, output_tokens=0, reasoning_tokens=0,
+                        cache_read_tokens=0, cache_write_tokens=0, cost=0.0,
+                    ))
+                middle = int(dt.datetime.combine(day - dt.timedelta(days=1), dt.time(14, 0)).timestamp() * 1000)
+                store.upsert_event(module.UsageRecord(
+                    message_id="b1", source="v2", source_rank=2, session_id="s",
+                    project_id="p", project_name="p", project_path="p",
+                    provider_id="bravo", model_id="m2", variant="high", agent="",
+                    event_time=middle, source_created=middle, source_updated=middle,
+                    input_tokens=100, output_tokens=0, reasoning_tokens=0,
+                    cache_read_tokens=0, cache_write_tokens=0, cost=0.0,
+                ))
+                store.conn.commit()
+                lo = int(dt.datetime.combine(day - dt.timedelta(days=3), dt.time(0, 0)).timestamp() * 1000)
+                hi = int(dt.datetime.combine(day, dt.time(23, 59)).timestamp() * 1000)
+
+                daily = store.analytics(lo, hi, granularity="day", event_limit=0)["trend"]
+                # A day with no usage is kept, so the line has no gap to jump over.
+                self.assertEqual([row["bucket"] for row in daily],
+                                 ["2026-03-07", "2026-03-08", "2026-03-09", "2026-03-10"])
+                self.assertEqual([row["total_with_cache"] for row in daily], [0, 300, 800, 500])
+                # Daily and hourly must agree, they only differ in the buckets.
+                hourly = store.analytics(lo, hi, granularity="hour", event_limit=0)["trend"]
+                self.assertEqual(
+                    sum(row["total_with_cache"] for row in daily),
+                    sum(row["total_with_cache"] for row in hourly),
+                )
+                # A shorter window yields a shorter series.
+                self.assertEqual(
+                    [row["bucket"] for row in store.analytics(
+                        int(dt.datetime.combine(day, dt.time(0, 0)).timestamp() * 1000), hi,
+                        granularity="day", event_limit=0)["trend"]],
+                    ["2026-03-10"],
+                )
+                # The filters reach it too.
+                self.assertEqual(
+                    [row["total_with_cache"] for row in store.analytics(
+                        lo, hi, provider_id="alpha", granularity="day", event_limit=0)["trend"]],
+                    [0, 300, 700, 500],
+                )
+                self.assertEqual(
+                    [row["total_with_cache"] for row in store.analytics(
+                        lo, hi, model_key=("bravo", "m2", "high"), granularity="day", event_limit=0)["trend"]],
+                    [0, 0, 100, 0],
+                )
+            finally:
+                store.close()
+
+    def test_daily_trend_costs_ride_the_existing_pricing_pass(self) -> None:
+        """The daily rows must carry the same cost fields as the trend beside them.
+
+        They are filled during the pass that is already made for the period, so
+        no second scan of the usage events is needed for them.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            store = module.Store(Path(temp))
+            try:
+                when = int(dt.datetime.combine(dt.date(2026, 3, 10), dt.time(9, 30)).timestamp() * 1000)
+                store.upsert_event(module.UsageRecord(
+                    message_id="a", source="v2", source_rank=2, session_id="s",
+                    project_id="p", project_name="p", project_path="p",
+                    provider_id="alpha", model_id="m1", variant="high", agent="",
+                    event_time=when, source_created=when, source_updated=when,
+                    input_tokens=1000, output_tokens=0, reasoning_tokens=0,
+                    cache_read_tokens=0, cache_write_tokens=0, cost=0.0,
+                ))
+                store.conn.commit()
+                lo, hi = when - 86_400_000, when + 86_400_000
+                analytics = store.analytics(lo, hi, granularity="hour", event_limit=0)
+                daily_rows = list(store.analytics(lo, hi, granularity="day", event_limit=0)["trend"])
+                module.attach_model_dev_costs(analytics, store.costing_rows(lo, hi), {}, {}, daily_rows)
+                fields = lambda row: sorted(k for k in row if "cost" in k or "pricing" in k)
+                self.assertEqual(fields(daily_rows[0]), fields(analytics["trend"][0]))
+                # Omitting the series leaves the previous behaviour untouched.
+                plain = store.analytics(lo, hi, granularity="hour", event_limit=0)
+                module.attach_model_dev_costs(plain, store.costing_rows(lo, hi), {}, {})
+                self.assertEqual(fields(plain["trend"][0]), fields(analytics["trend"][0]))
+            finally:
+                store.close()
+
+    def test_trend_is_drawn_as_a_monotone_curve(self) -> None:
+        """The line chart bends without inventing peaks.
+
+        A plain Catmull-Rom or ordinary Bezier spline overshoots between
+        samples, which draws humps on stretches where the data is flat. The
+        Fritsch-Carlson tangents are clamped, so each stretch between two points
+        keeps its direction and the curve cannot reverse or leave the data range.
+        """
+        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("function smoothPath(points)", html)
+        self.assertIn("Fritsch-Carlson", html)
+        # A zero tangent breaks the ratio, so it is handled before dividing.
+        self.assertIn("if (slope[i]===0){ m[i]=0; m[i+1]=0; continue; }", html)
+        # Tangents are scaled down when they would loop.
+        self.assertIn("if (len>3){ m[i]=3*a/len*slope[i]; m[i+1]=3*b/len*slope[i]; }", html)
+        # A sign change sets the tangent to zero, which is what stops the overshoot.
+        self.assertIn("m[i]=(slope[i-1]*slope[i]<=0) ? 0 : (slope[i-1]+slope[i])/2;", html)
+        # Both the stroke and the fill come from the curve, not from the points.
+        self.assertIn("const points = rows.map((r,i)=>[x(i),y(values[i])]); const line = smoothPath(points);", html)
+        self.assertIn("const area = `${line} L${points.at(-1)[0]}", html)
+
+    def test_overview_shows_a_daily_trend_card(self) -> None:
+        """The daily trend sits on the overview in the same card style.
+
+        It follows the period, shares the metric picker above it, and is only
+        drawn in the full layout, since the compact layout has its own chart.
+        """
+        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+        self.assertIn('<h2 class="section-title">最近每日趋势</h2>', html)
+        self.assertIn('id="daily-trend-caption"', html)
+        self.assertIn('id="daily-trend-svg"', html)
+        self.assertIn('id="daily-tooltip"', html)
+        self.assertIn(".chart-wrap.daily-chart { height: 224px; }", html)
+        # Same card and head classes as the trend above it.
+        self.assertRegex(
+            html,
+            r'<article class="card section-card">\s*<div class="section-head">\s*'
+            r'<div><h2 class="section-title">最近每日趋势</h2>',
+        )
+        # Rendered from the series the backend sends, with its own tooltip.
+        self.assertIn('drawChart($("#daily-trend-svg"), $("#daily-tooltip"), daily)', html)
+        self.assertIn("const daily=data.daily_trend||[]", html)
+        # The caption states how many days are on it.
+        self.assertIn("按天 · ${days?`共 ${days} 天`", html)
+        # The card lives in the full overview, which the compact layout hides.
+        self.assertIn('body[data-layout="compact"] .full-overview { display: none; }', html)
 
     def test_default_dashboard_window_is_compact_enough(self) -> None:
         self.assertEqual(module.DEFAULT_WINDOW_WIDTH, 985)

@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw
 APP_NAME = "Agent Token Monitor"
 APP_ID = "Agent.TokenMonitor"
 DATA_DIR_NAME = "AgentTokenMonitor"
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 # Default window size. Chosen so the overview card, the period buttons and
 # both filter dropdowns are all visible without scrolling on a 1080p display.
 DEFAULT_WINDOW_WIDTH = 985
@@ -3349,7 +3349,11 @@ def _finish_cost(bucket: dict[str, Any]) -> dict[str, Any]:
     return bucket
 
 
-def attach_model_dev_costs(analytics: dict[str, Any], rows: list[dict[str, Any]], catalog: dict[str, Any], pricing_config: dict[str, Any] | None = None) -> dict[str, Any]:
+def attach_model_dev_costs(analytics: dict[str, Any], rows: list[dict[str, Any]], catalog: dict[str, Any], pricing_config: dict[str, Any] | None = None, daily_trend: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    # daily_trend is an optional day-bucketed series for the same rows. It rides
+    # along in this pass so the prices are only worked out once, rather than
+    # rescanning the period for a second set of totals.
+    daily_buckets: dict[str, dict[str, Any]] = {str(row["bucket"]): _empty_cost_bucket() for row in (daily_trend or [])}
     summary = _empty_cost_bucket()
     trend: dict[str, dict[str, Any]] = {str(row["bucket"]): _empty_cost_bucket() for row in analytics["trend"]}
     providers: dict[str, dict[str, Any]] = {str(row["name"]): _empty_cost_bucket() for row in analytics["providers"]}
@@ -3369,6 +3373,10 @@ def attach_model_dev_costs(analytics: dict[str, Any], rows: list[dict[str, Any]]
         bucket = event_dt.strftime("%Y-%m-%d %H:00" if granularity == "hour" else "%Y-%m-%d")
         if bucket in trend:
             _merge_cost(trend[bucket], row, calculated)
+        if daily_buckets:
+            day = event_dt.strftime("%Y-%m-%d")
+            if day in daily_buckets:
+                _merge_cost(daily_buckets[day], row, calculated)
         provider = str(row["provider_id"] or "")
         if provider in providers:
             _merge_cost(providers[provider], row, calculated)
@@ -3382,6 +3390,8 @@ def attach_model_dev_costs(analytics: dict[str, Any], rows: list[dict[str, Any]]
     analytics["summary"].update(_finish_cost(summary))
     for row in analytics["trend"]:
         row.update(_finish_cost(trend.get(str(row["bucket"]), _empty_cost_bucket())))
+    for row in daily_trend or []:
+        row.update(_finish_cost(daily_buckets.get(str(row["bucket"]), _empty_cost_bucket())))
     for row in analytics["providers"]:
         row.update(_finish_cost(providers.get(str(row["name"]), _empty_cost_bucket())))
     for row in analytics["models"]:
@@ -3479,7 +3489,22 @@ class DashboardApi:
             elif selected_pricing_mode == "custom":
                 pricing_status = {"source": "custom", "state": "enabled", "updated_at": now_ms()}
             costing_rows = store.costing_rows(start_ms, end_ms, provider or None, model_key, source=source or None)
-            attach_model_dev_costs(analytics, costing_rows, pricing_catalog, config)
+            # The overview carries a second, always day-grained series covering
+            # the same period, so picking a shorter period narrows the daily
+            # trend too. analytics is reused rather than given a lean twin: it
+            # keeps the filter semantics in one place, and the extra grouping is
+            # cheap next to the scan the cost pass needs anyway.
+            daily = store.analytics(
+                start_ms,
+                end_ms,
+                provider_id=provider or None,
+                model_key=model_key,
+                granularity="day",
+                event_limit=0,
+                source=source or None,
+            )
+            daily_trend = list(daily["trend"])
+            attach_model_dev_costs(analytics, costing_rows, pricing_catalog, config, daily_trend)
             pricing_status["enabled"] = pricing_enabled or selected_pricing_mode == "custom"
             pricing_status["mode"] = selected_pricing_mode
             pricing_status["multiplier"] = pricing_multiplier(config) if selected_pricing_mode == "multiplier" else 1.0
@@ -3552,6 +3577,7 @@ class DashboardApi:
                 "options": options,
                 "summary": analytics["summary"],
                 "trend": analytics["trend"],
+                "daily_trend": daily_trend,
                 "granularity": analytics["granularity"],
                 "providers": analytics["providers"],
                 "models": analytics["models"],
