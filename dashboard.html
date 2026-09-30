@@ -231,7 +231,7 @@
     /* Every chart svg needs the same explicit sizing. An unsized svg falls back
        to the 300x150 default while its viewBox is measured from the full card,
        so the drawing is clipped instead of scaled to fit. */
-    #trend-svg, #daily-trend-svg, #compact-trend-svg { width: 100%; height: 100%; display: block; overflow: hidden; }
+    #trend-svg, #daily-trend-svg, #compact-trend-svg, #compact-daily-svg { width: 100%; height: 100%; display: block; overflow: hidden; }
     .chart-tooltip {
       position: absolute; z-index: 20; min-width: 228px; padding: 14px 15px; pointer-events: none;
       background: color-mix(in srgb, var(--surface-3) 94%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--border));
@@ -576,6 +576,7 @@
 
            <div class="compact-breakdown-grid"><article class="card compact-list"><div class="section-head"><div><h2 class="section-title">供应商</h2><div class="section-subtitle">Token 使用排行</div></div></div><div id="compact-providers"></div></article><article class="card compact-list"><div class="section-head"><div><h2 class="section-title">模型</h2><div class="section-subtitle">Token 使用排行</div></div></div><div id="compact-models"></div></article></div>
            <article class="card compact-chart-card"><div class="section-head"><div><h2 class="section-title">趋势</h2><div id="compact-trend-caption" class="section-subtitle">今日 · 按小时</div></div></div><div class="chart-wrap compact-chart"><svg id="compact-trend-svg" role="img" aria-label="紧凑 Token 趋势"></svg><div id="compact-tooltip" class="chart-tooltip"></div></div></article>
+           <article class="card compact-chart-card"><div class="section-head"><div><h2 class="section-title">最近每日趋势</h2><div id="compact-daily-caption" class="section-subtitle">每点 24 小时</div></div></div><div class="chart-wrap compact-chart"><svg id="compact-daily-svg" role="img" aria-label="紧凑最近每日 Token 趋势"></svg><div id="compact-daily-tooltip" class="chart-tooltip"></div></div></article>
 
         </div>
       </section>
@@ -807,15 +808,20 @@
         const unit = data.granularity === "hour" ? "按小时" : "按天"; const caption = `${({today:"今日","24h":"最近24小时","7d":"7天","30d":"30天","90d":"90天",all:"全部",custom:"自定义"})[state.period]} · ${unit}`;
         setText("#trend-caption", caption); setText("#compact-trend-caption", caption); renderRanking("#provider-ranking", data.providers || []); renderRanking("#model-ranking", data.models || []);
         const top = (data.providers || []).slice(0,6); const topModels = (data.models || []).slice(0,6); $("#compact-providers").innerHTML = top.length ? top.map(r => `<div class="compact-list-row"><span>${esc(r.name)}</span><strong>${compactFmt(r.total_with_cache)}</strong></div>`).join("") : `<div class="section-subtitle">暂无数据</div>`; $("#compact-models").innerHTML = topModels.length ? topModels.map(r => `<div class="compact-list-row"><span title="${esc(r.name)}">${esc(r.name)}</span><strong>${compactFmt(r.total_with_cache)}</strong></div>`).join("") : `<div class="section-subtitle">暂无数据</div>`;
-        if(state.compact)drawChart($("#compact-trend-svg"), $("#compact-tooltip"), data.trend || []);else {
-          drawChart($("#trend-svg"), $("#chart-tooltip"), data.trend || []);
-          const daily=data.daily_trend||[]; const days=daily.length;
-          // Each point is a whole 24 hours, not a calendar day, so the caption
-          // says so: the newest point is the trailing 24 hours, and every other
-          // point is the same length, which is what makes them comparable.
-          setText("#daily-trend-caption", `每点 24 小时 · 共 ${days?days:0} 天 · 指标同上方`);
-          drawChart($("#daily-trend-svg"), $("#daily-tooltip"), daily);
-        }
+        // Each point is a whole 24 hours, not a calendar day, so the caption says
+        // so: the newest point is the trailing 24 hours, and every other point is
+        // the same length, which is what makes them comparable with one another.
+        const daily=data.daily_trend||[]; const days=daily.length;
+        setText("#daily-trend-caption", `每点 24 小时 · 共 ${days?days:0} 天 · 指标同上方`);
+        setText("#compact-daily-caption", `每点 24 小时 · 共 ${days?days:0} 天`);
+        // The compact layout has its own copy of the trend chart, and on a scaled
+        // display the default window lands in the compact layout, so both charts
+        // are drawn there as well. Without this the daily card only existed in
+        // the full layout and was invisible at the default window size.
+        if(state.compact)drawChart($("#compact-trend-svg"), $("#compact-tooltip"), data.trend || []);
+        else drawChart($("#trend-svg"), $("#chart-tooltip"), data.trend || []);
+        drawChart($("#daily-trend-svg"), $("#daily-tooltip"), daily);
+        drawChart($("#compact-daily-svg"), $("#compact-daily-tooltip"), daily);
       }
       // Only the top five are listed; the arrows walk through the rest. The
       // scale is taken from the largest entry overall rather than from the

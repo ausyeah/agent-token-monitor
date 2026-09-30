@@ -1577,12 +1577,25 @@ class MonitorTests(unittest.TestCase):
         self.assertIn('id="daily-trend-caption"', html)
         self.assertIn('id="daily-trend-svg"', html)
         self.assertIn('id="daily-tooltip"', html)
+        # The compact layout needs its own copy. On a scaled display the default
+        # window lands in the compact layout, so a card that only exists in the
+        # full layout is a card nobody sees at the default size.
+        # The compact copy carries the same title, so the count of titles is the
+        # check: one per layout. Matching title plus caption as a single string
+        # would also pass if the caption sat in the wrong card.
+        self.assertEqual(html.count('<h2 class="section-title">最近每日趋势</h2>'), 2)
+        self.assertIn('<div id="compact-daily-caption" class="section-subtitle">每点 24 小时</div>', html)
+        self.assertIn('id="compact-daily-svg"', html)
+        self.assertIn('id="compact-daily-tooltip"', html)
+        self.assertIn('drawChart($("#compact-daily-svg"), $("#compact-daily-tooltip"), daily)', html)
+        self.assertIn('setText("#compact-daily-caption", `每点 24 小时 · 共 ${days?days:0} 天`);', html)
         self.assertIn(".chart-wrap.daily-chart { height: 224px; }", html)
         # An unsized svg falls back to the 300x150 default while its viewBox is
         # measured from the full card, so the drawing gets clipped. Every chart
         # svg has to be in that rule, not just the first one that existed.
         self.assertIn(
-            "#trend-svg, #daily-trend-svg, #compact-trend-svg { width: 100%; height: 100%; display: block; overflow: hidden; }",
+            "#trend-svg, #daily-trend-svg, #compact-trend-svg, #compact-daily-svg "
+            "{ width: 100%; height: 100%; display: block; overflow: hidden; }",
             html,
         )
         # No other chart svg may be left out of it.
@@ -1603,8 +1616,18 @@ class MonitorTests(unittest.TestCase):
         # which is what makes the points comparable with one another.
         self.assertIn("const daily=data.daily_trend||[]", html)
         self.assertIn('setText("#daily-trend-caption", `每点 24 小时 · 共 ${days?days:0} 天 · 指标同上方`);', html)
-        # The card lives in the full overview, which the compact layout hides.
+        # The card lives in the full overview, which the compact layout hides,
+        # so the compact layout carries its own copy of both charts.
         self.assertIn('body[data-layout="compact"] .full-overview { display: none; }', html)
+        self.assertIn('body[data-layout="compact"] .compact-overview { display: block; }', html)
+        # The compact switch is what decides, so the default window on a scaled
+        # display lands in the compact layout. Both charts are drawn in each.
+        self.assertIn("const compact = effectiveWidth < 760 || effectiveHeight < 680;", html)
+        self.assertIn(
+            'if(state.compact)drawChart($("#compact-trend-svg"), $("#compact-tooltip"), data.trend || []);',
+            html,
+        )
+        self.assertIn('else drawChart($("#trend-svg"), $("#chart-tooltip"), data.trend || []);', html)
 
     def test_default_dashboard_window_is_compact_enough(self) -> None:
         self.assertEqual(module.DEFAULT_WINDOW_WIDTH, 985)
