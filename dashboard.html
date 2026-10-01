@@ -495,6 +495,11 @@
     body[data-layout="mini"] .compact-stat strong { overflow-wrap: anywhere; }
     body[data-layout="mini"] .compact-cache-row { margin-top: 12px; }
     body[data-layout="mini"] #compact-token-share { display: none; }
+    /* No expand button on the one card: at the size it appears there is nothing
+       to expand into, and a control that half the card is not a control worth
+       the room. Double-clicking the title bar restores the window, which is what
+       the button would have done. */
+    body[data-layout="mini"] #expand-button { display: none; }
     /* The window can get down to about 240 CSS pixels wide, where two columns of
        figures and the legend cannot both fit: the content stops wrapping and
        spills past the window edge, which is what the reader sees as the card
@@ -791,10 +796,20 @@
       // the compact layout still could not show the figures: the title, the
       // period row, the filter row and the tabs each wrapped onto their own lines
       // and pushed the hero card below the fold. Below the mini threshold the
-      // chrome goes and one card keeps the whole window, so the numbers are what
-      // the reader sees however small they drag the window.
+      // chrome goes and one card keeps the whole window.
+      //
+      // Both dimensions have to be small. A narrow window on a tall screen, or a
+      // short one on a wide screen, has room for the ordinary page and gets it:
+      // dropping the controls because one axis happened to be small took away
+      // things the window had space to show.
+      //
+      // The thresholds sit just above the window's own minimum, so this only
+      // happens when the reader has dragged it as small as it goes. Triggering it
+      // across half the screen would leave no size at which the ordinary page is
+      // the point.
+      const MINI_WIDTH = 370, MINI_HEIGHT = 490;
       function layoutFor(width, height) {
-        if (width < 480 || height < 520) return "mini";
+        if (width < MINI_WIDTH && height < MINI_HEIGHT) return "mini";
         if (width < 760 || height < 680) return "compact";
         return "full";
       }

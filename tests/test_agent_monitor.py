@@ -1304,9 +1304,15 @@ class MonitorTests(unittest.TestCase):
         # No scrolling at that size, since there is nothing below to scroll to.
         self.assertIn('body[data-layout="mini"] { overflow: hidden; }', html)
         # The mini threshold sits below the compact one, so a normal compact
-        # window is unaffected.
-        self.assertIn('if (width < 480 || height < 520) return "mini";', html)
+        # window is unaffected. Both dimensions have to be small: a narrow window
+        # on a tall screen still has room for the ordinary page.
+        self.assertIn('if (width < MINI_WIDTH && height < MINI_HEIGHT) return "mini";', html)
+        self.assertNotIn('if (width < 480 || height < 520) return "mini";', html)
         self.assertIn('if (width < 760 || height < 680) return "compact";', html)
+        # No expand button on the one card: there is nothing at that size to
+        # expand into, and double-clicking the title bar already restores the
+        # window. The button is in the hero, so the mini rules have to reach it.
+        self.assertIn('body[data-layout="mini"] #expand-button { display: none; }', html)
         # Charts are not on screen at that size, so they are not drawn into.
         self.assertIn("if(!state.mini){", html)
         self.assertIn("if (state.data?.trend && !mini) scheduleChart();", html)
@@ -1740,9 +1746,14 @@ class MonitorTests(unittest.TestCase):
         # The layout switch is what decides, so the default window on a scaled
         # display lands in the compact layout. Both charts are drawn in each of
         # the two layouts that show them.
-        self.assertIn('if (width < 480 || height < 520) return "mini";', html)
+        self.assertIn('if (width < MINI_WIDTH && height < MINI_HEIGHT) return "mini";', html)
         self.assertIn('if (width < 760 || height < 680) return "compact";', html)
         self.assertIn('return "full";', html)
+        # Just above the window's own minimum of 360x480, so the single card
+        # only replaces the page when the reader has dragged it as small as it
+        # goes. Anything looser would take the card away over half the screen.
+        self.assertIn("const MINI_WIDTH = 370, MINI_HEIGHT = 490;", html)
+        self.assertNotIn('if (width < MINI_WIDTH || height < MINI_HEIGHT) return "mini";', html)
         self.assertIn(
             'if(state.compact)drawChart($("#compact-trend-svg"), $("#compact-tooltip"), data.trend || []);',
             html,
