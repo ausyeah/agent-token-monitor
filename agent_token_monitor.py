@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw
 APP_NAME = "Agent Token Monitor"
 APP_ID = "Agent.TokenMonitor"
 DATA_DIR_NAME = "AgentTokenMonitor"
-VERSION = "4.5.1"
+VERSION = "4.6.0"
 # Default window size. Chosen so the overview card, the period buttons and
 # both filter dropdowns are all visible without scrolling on a 1080p display.
 DEFAULT_WINDOW_WIDTH = 985
@@ -3929,6 +3929,25 @@ class DashboardApi:
     def maximize_window(self) -> dict[str, bool]:
         if DASHBOARD_WINDOW is not None:
             DASHBOARD_WINDOW.maximize()
+        return {"ok": True}
+
+    def restore_window(self) -> dict[str, bool]:
+        """Put the window back to the size it opens at.
+
+        The single card layout appears when the window has been dragged to its
+        minimum, and the way out of it is a button on that card. Maximising would
+        not be the way back: the reader came from the ordinary page, so that is
+        the size to return to, and the default is recomputed the same way it was
+        at startup so a smaller screen is still respected.
+        """
+        if DASHBOARD_WINDOW is None:
+            return {"ok": False}
+        width, height = _fit_window_to_screen(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+        try:
+            DASHBOARD_WINDOW.restore()
+        except Exception:
+            pass
+        DASHBOARD_WINDOW.resize(width, height)
         return {"ok": True}
 
 

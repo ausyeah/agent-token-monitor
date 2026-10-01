@@ -1274,6 +1274,52 @@ class MonitorTests(unittest.TestCase):
         # The name moves to the control itself rather than being dropped.
         self.assertIn('<select id="source-filter" aria-label="数据来源">', html)
 
+    def test_restoring_the_window_returns_to_its_opening_size(self) -> None:
+        """The way back off the single card goes to the default size.
+
+        Maximising would not be the way back: the reader came from the ordinary
+        page, so that is the size to return to. The size is recomputed the same
+        way it was at startup, so a screen too small for it is still respected.
+        """
+        import agent_token_monitor as m
+
+        class FakeWindow:
+            def __init__(self) -> None:
+                self.calls: list = []
+
+            def restore(self) -> None:
+                self.calls.append("restore")
+
+            def resize(self, width: int, height: int) -> None:
+                self.calls.append(("resize", width, height))
+
+            def maximize(self) -> None:
+                self.calls.append("maximize")
+
+        window = FakeWindow()
+        original = m.DASHBOARD_WINDOW
+        m.DASHBOARD_WINDOW = window
+        try:
+            result = m.DashboardApi(Path("config.json")).restore_window()
+        finally:
+            m.DASHBOARD_WINDOW = original
+
+        self.assertEqual(result, {"ok": True})
+        # A window that was maximised has to come back from maximised too, or the
+        # resize is applied to a maximised window and ignored.
+        self.assertEqual(window.calls[0], "restore")
+        self.assertEqual(window.calls[1][0], "resize")
+        self.assertEqual(
+            window.calls[1][1:],
+            m._fit_window_to_screen(m.DEFAULT_WINDOW_WIDTH, m.DEFAULT_WINDOW_HEIGHT),
+        )
+        self.assertNotIn("maximize", window.calls)
+
+        # With no window there is nothing to restore, and saying so is better than
+        # raising into the page.
+        m.DASHBOARD_WINDOW = None
+        self.assertEqual(m.DashboardApi(Path("config.json")).restore_window(), {"ok": False})
+
     def test_the_smallest_window_shows_one_card_of_figures(self) -> None:
         """Below the mini threshold the chrome goes and one card fills the window.
 
@@ -1301,6 +1347,13 @@ class MonitorTests(unittest.TestCase):
         self.assertIn('body[data-layout="mini"] .full-overview,', rules)
         self.assertIn("body[data-layout=\"mini\"] .compact-overview { display: block; }", rules)
         self.assertIn("body[data-layout=\"mini\"] .compact-hero { flex: 1 1 auto;", rules)
+        # The card carries no trend, so the hint to hover one is advice the reader
+        # cannot act on. Left in, it wraps over three lines in the width the two
+        # buttons leave and pushes the figures down.
+        self.assertIn(
+            'caption.textContent = mini ? "当前周期 Token" : "当前周期 Token · 悬停趋势查看详情";',
+            html,
+        )
         # No scrolling at that size, since there is nothing below to scroll to.
         self.assertIn('body[data-layout="mini"] { overflow: hidden; }', html)
         # The mini threshold sits below the compact one, so a normal compact
@@ -1309,10 +1362,23 @@ class MonitorTests(unittest.TestCase):
         self.assertIn('if (width < MINI_WIDTH && height < MINI_HEIGHT) return "mini";', html)
         self.assertNotIn('if (width < 480 || height < 520) return "mini";', html)
         self.assertIn('if (width < 760 || height < 680) return "compact";', html)
-        # No expand button on the one card: there is nothing at that size to
-        # expand into, and double-clicking the title bar already restores the
-        # window. The button is in the hero, so the mini rules have to reach it.
+        # The card carries its own refresh and its own way back, because at that
+        # size it is the only thing on screen. The way back returns to the size
+        # the window opens at rather than maximising: that is where the reader
+        # came from. The expand button stays for the ordinary compact layout.
+        self.assertIn('id="mini-refresh"', html)
+        self.assertIn('id="mini-restore"', html)
+        self.assertIn('class="mini-actions"', html)
+        self.assertIn('.mini-actions { display: none;', html)
+        self.assertIn('body[data-layout="mini"] .mini-actions { display: flex;', html)
         self.assertIn('body[data-layout="mini"] #expand-button { display: none; }', html)
+        self.assertIn('$("#mini-restore").addEventListener("click",()=>callApi("restore_window"));', html)
+        # One refresh routine behind both buttons, so they cannot drift apart in
+        # what they do or in how they report being busy.
+        self.assertIn("const refreshButtons = () => [$(\"#refresh-button\"), $(\"#mini-refresh\")].filter(Boolean);", html)
+        self.assertIn("async function refreshNow()", html)
+        self.assertIn("const busyRefresh = (show) => refreshButtons().forEach(b => b.classList.toggle(\"busy\", !!show));", html)
+        self.assertIn('refreshButtons().forEach(button=>button.addEventListener("click",refreshNow));', html)
         # Charts are not on screen at that size, so they are not drawn into.
         self.assertIn("if(!state.mini){", html)
         self.assertIn("if (state.data?.trend && !mini) scheduleChart();", html)
@@ -1646,16 +1712,17 @@ class MonitorTests(unittest.TestCase):
         self.assertNotIn("backdrop-filter", style)
         self.assertNotIn("place-items: center", style)
         # The refresh button says it is working, and cannot be pressed twice.
-        self.assertIn("const busyRefresh = (show) => $(\"#refresh-button\").classList.toggle(\"busy\", !!show);", html)
+        self.assertIn("const busyRefresh = (show) => refreshButtons().forEach(b => b.classList.toggle(\"busy\", !!show));", html)
         self.assertIn(".icon-button.busy { pointer-events: none;", html)
         self.assertIn(".icon-button.busy .icon { animation: spin .7s linear infinite; }", html)
         # The busy state is cleared on every path out, including a failure.
         self.assertIn("finally{if(sequence===state.sequence){showLoading(false); busyRefresh(false);}}", html)
-        self.assertIn("finally{showLoading(false); busyRefresh(false);}", html)
+        self.assertIn("showLoading(false); busyRefresh(false);", html)
         # A background reload is silent; only a deliberate one shows the bar.
         self.assertIn("const quiet=state.data&&!force; showLoading(!quiet);", html)
-        # The deliberate paths ask for it.
-        self.assertIn("$(\"#refresh-button\").addEventListener(\"click\",async()=>{showLoading(true); busyRefresh(true);", html)
+        # The deliberate path asks for it, and re-reads rather than silently
+        # reusing the background reload.
+        self.assertIn("showLoading(true); busyRefresh(true);", html)
         self.assertIn("await loadView(true);", html)
         # The spinner that used to be centred is no longer the loading mark.
         self.assertNotIn('<div id="loading" class="loading"><div class="loading-mark"></div></div>', html)
