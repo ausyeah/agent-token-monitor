@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw
 APP_NAME = "Agent Token Monitor"
 APP_ID = "Agent.TokenMonitor"
 DATA_DIR_NAME = "AgentTokenMonitor"
-VERSION = "4.4.0"
+VERSION = "4.5.0"
 # Default window size. Chosen so the overview card, the period buttons and
 # both filter dropdowns are all visible without scrolling on a 1080p display.
 DEFAULT_WINDOW_WIDTH = 985

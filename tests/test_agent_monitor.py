@@ -1242,7 +1242,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("options?.sources || []).find(x => x.value === value)", html)
         self.assertIn('state.source=e.target.value||""', html)
         self.assertNotIn("find(x=>x.label===label)", html)
-        self.assertIn('<select id="source-filter"><option value="">', html)
+        self.assertIn('<select id="source-filter" aria-label="数据来源"><option value="">', html)
 
         store = module.Store(module.app_data_dir())
         try:
@@ -1265,9 +1265,51 @@ class MonitorTests(unittest.TestCase):
         self.assertIn(".segmented::-webkit-scrollbar { display: none; }", style)
         self.assertNotIn("minmax(0,1fr) minmax(0,1fr) auto auto", style)
         self.assertNotIn("repeat(auto-fit, minmax(150px, 1fr))", style)
-        # The source switcher must survive compact mode with a visible label.
+        # The source switcher must survive compact mode, and it carries no visible
+        # label in any layout: the dropdown already reads "全部来源" or the chosen
+        # agent's name, so a second "来源" in front of it added nothing, and in
+        # compact mode it was the one label left standing next to a bare select.
         self.assertIn('body[data-layout="compact"] #source-field { display: flex;', html)
-        self.assertIn('body[data-layout="compact"] #source-field .filter-field-label { display: inline;', html)
+        self.assertNotIn("filter-field-label", html)
+        # The name moves to the control itself rather than being dropped.
+        self.assertIn('<select id="source-filter" aria-label="数据来源">', html)
+
+    def test_the_smallest_window_shows_one_card_of_figures(self) -> None:
+        """Below the mini threshold the chrome goes and one card fills the window.
+
+        The window has a hard minimum size, and at that size the compact layout
+        still could not show the figures: the title, the period row, the filter
+        row and the tabs each wrapped onto their own lines and pushed the hero
+        card below the fold. The reader dragging the window smaller was left
+        scrolling for the numbers they had come for.
+        """
+        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+        mini = html.split('body[data-layout="mini"] { overflow: hidden; }')[1].split("@media")[0]
+        self.assertTrue(mini.strip(), "no mini layout rules found")
+        rules = mini
+        # Everything that is not the card is taken out of the way. The detail view is
+        # matched by id, since its class is just "view" and ".detail-view" would
+        # match nothing.
+        for selector in (".topbar", ".control-bar", ".view-tabs", ".compact-breakdown-grid",
+                         ".compact-chart-card", ".pulse-strip", ".full-overview", "footer",
+                         "#detail-view"):
+            self.assertIn(f'body[data-layout="mini"] {selector}', rules,
+                          f"{selector} is not hidden in the mini layout")
+        # And the card is given the whole window rather than left at its size. The full
+        # overview has to go too: left up alongside the compact one, the wide
+        # full-layout card shows through and overflows the narrow window.
+        self.assertIn('body[data-layout="mini"] .full-overview,', rules)
+        self.assertIn("body[data-layout=\"mini\"] .compact-overview { display: block; }", rules)
+        self.assertIn("body[data-layout=\"mini\"] .compact-hero { flex: 1 1 auto;", rules)
+        # No scrolling at that size, since there is nothing below to scroll to.
+        self.assertIn('body[data-layout="mini"] { overflow: hidden; }', html)
+        # The mini threshold sits below the compact one, so a normal compact
+        # window is unaffected.
+        self.assertIn('if (width < 480 || height < 520) return "mini";', html)
+        self.assertIn('if (width < 760 || height < 680) return "compact";', html)
+        # Charts are not on screen at that size, so they are not drawn into.
+        self.assertIn("if(!state.mini){", html)
+        self.assertIn("if (state.data?.trend && !mini) scheduleChart();", html)
 
     def test_token_share_readout_is_rendered_next_to_the_bar(self) -> None:
         """The composition bar shows each segment's percentage inline."""
@@ -1695,9 +1737,12 @@ class MonitorTests(unittest.TestCase):
         # so the compact layout carries its own copy of both charts.
         self.assertIn('body[data-layout="compact"] .full-overview { display: none; }', html)
         self.assertIn('body[data-layout="compact"] .compact-overview { display: block; }', html)
-        # The compact switch is what decides, so the default window on a scaled
-        # display lands in the compact layout. Both charts are drawn in each.
-        self.assertIn("const compact = effectiveWidth < 760 || effectiveHeight < 680;", html)
+        # The layout switch is what decides, so the default window on a scaled
+        # display lands in the compact layout. Both charts are drawn in each of
+        # the two layouts that show them.
+        self.assertIn('if (width < 480 || height < 520) return "mini";', html)
+        self.assertIn('if (width < 760 || height < 680) return "compact";', html)
+        self.assertIn('return "full";', html)
         self.assertIn(
             'if(state.compact)drawChart($("#compact-trend-svg"), $("#compact-tooltip"), data.trend || []);',
             html,

@@ -424,11 +424,11 @@
       body[data-layout="compact"] .segmented { width: 100%; max-width: 100%; justify-content: flex-start; flex-wrap: wrap; row-gap: 3px; border-radius: 14px; }
       body[data-layout="compact"] .segmented .period-button { flex: 0 0 auto; }
       body[data-layout="compact"] .control-divider, body[data-layout="compact"] .filter-field label, body[data-layout="compact"] #model-field { display: none; }
-      /* The source switcher stays labelled in compact mode: it is the only
-         control that changes which agent is being measured, so dropping its
-         label would leave an unidentifiable bare dropdown. */
+      /* No label in front of the source switcher in any layout. It reads
+         "全部来源", or the chosen agent's name, so a second word saying
+         "来源" in front of it told the reader nothing the control had not
+         already said, and in the compact layout it was the only label left. */
       body[data-layout="compact"] #source-field { display: flex; min-width: 0; }
-      body[data-layout="compact"] #source-field .filter-field-label { display: inline; flex: 0 0 auto; font-size: 10px; }
       body[data-layout="compact"] #source-field select { min-width: 96px; width: 100%; }
       body[data-layout="compact"] select { min-width: 128px; height: 34px; }
       body[data-layout="compact"] .period-button { min-width: 46px; padding: 7px 10px; }
@@ -467,6 +467,49 @@
       body[data-layout="compact"] .top-actions .icon-button:first-of-type { display: none; }
       body[data-layout="compact"] .compact-stats { grid-template-columns: 1fr 1fr; }
       body[data-layout="compact"] .compact-number { font-size: 38px; }
+    }
+    /* At the smallest size there is no room for chrome and data both: the
+       period row, the filter row and the tabs wrapped onto four lines and
+       pushed the figures the reader came for below the fold. The mini layout
+       drops the controls entirely and gives the whole window to one card, from
+       the scope line down to the cache figures. */
+    body[data-layout="mini"] { overflow: hidden; }
+    body[data-layout="mini"] .shell { padding: 10px; height: 100vh; display: flex; flex-direction: column; }
+    body[data-layout="mini"] .topbar,
+    body[data-layout="mini"] .control-bar,
+    body[data-layout="mini"] .view-tabs,
+    body[data-layout="mini"] .compact-breakdown-grid,
+    body[data-layout="mini"] .compact-chart-card,
+    body[data-layout="mini"] .pulse-strip,
+    body[data-layout="mini"] .full-overview,
+    body[data-layout="mini"] footer,
+    body[data-layout="mini"] #detail-view { display: none; }
+    body[data-layout="mini"] .compact-overview { display: block; }
+    body[data-layout="mini"] .compact-hero { flex: 1 1 auto; display: flex; flex-direction: column; justify-content: center; padding: 14px; }
+    body[data-layout="mini"] .compact-hero .compact-top .scope-line { font-size: 12px; }
+    body[data-layout="mini"] .compact-number { font-size: 40px; line-height: 1.1; }
+    body[data-layout="mini"] .compact-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 12px; }
+    body[data-layout="mini"] .compact-stat { padding: 10px 12px; }
+    body[data-layout="mini"] .compact-stat strong { font-size: 17px; }
+    body[data-layout="mini"] .compact-hero *, body[data-layout="mini"] .compact-hero { min-width: 0; }
+    body[data-layout="mini"] .compact-stat strong { overflow-wrap: anywhere; }
+    body[data-layout="mini"] .compact-cache-row { margin-top: 12px; }
+    body[data-layout="mini"] #compact-token-share { display: none; }
+    /* The window can get down to about 240 CSS pixels wide, where two columns of
+       figures and the legend cannot both fit: the content stops wrapping and
+       spills past the window edge, which is what the reader sees as the card
+       being cut in half. One column, and the per-segment numbers go, leaving
+       the bar itself to carry the composition. */
+    @media (max-width: 400px) {
+      body[data-layout="mini"] .compact-stats { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+      /* Label above value, not label left and value right. Spreading the pair
+         across the full row width pushed the figures to the far edge, where
+         they read as cut off rather than as a total. */
+      body[data-layout="mini"] .compact-stat { padding: 7px 10px; }
+      body[data-layout="mini"] .compact-stat strong { margin-top: 2px; font-size: 15px; }
+      body[data-layout="mini"] .compact-cache-legend { display: none; }
+      body[data-layout="mini"] .compact-number { font-size: 34px; }
+      body[data-layout="mini"] .compact-hero .compact-caption { font-size: 10px; }
     }
     @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; scroll-behavior: auto !important; } }
   </style>
@@ -510,7 +553,7 @@
       <span class="control-divider"></span>
       <div class="filter-field"><label for="provider-filter">供应商</label><select id="provider-filter"><option>全部供应商</option></select></div>
       <div class="filter-field" id="model-field"><label for="model-filter">模型</label><select id="model-filter"><option>全部模型</option></select></div>
-      <div class="filter-field" id="source-field"><label class="filter-field-label" for="source-filter">来源</label><select id="source-filter"><option value="">全部来源</option></select></div>
+      <div class="filter-field" id="source-field"><select id="source-filter" aria-label="数据来源"><option value="">全部来源</option></select></div>
       <button id="reset-button" class="soft-button">重置筛选</button>
       <div class="control-quick-actions"><button id="pricing-quick-button" class="quick-button" title="打开价格设置">价格</button><button id="currency-quick-button" class="quick-button" title="切换美元/人民币">$</button></div>
     </section>
@@ -635,7 +678,7 @@
       "use strict";
       const $ = (selector) => document.querySelector(selector);
       const $$ = (selector) => [...document.querySelectorAll(selector)];
-      const state = { period: "today", provider: "", model: "", view: "overview", metric: "total_with_cache", customStart: "", customEnd: "", search: "", sortKey: "", sortDirection: "desc", currentRows: [], data: null, sequence: 0, redrawAfter: 0, compact: false, pricingSettings: null, pricingDraftRows: [], source: "", rankPage: { provider: 0, model: 0 } };
+      const state = { period: "today", provider: "", model: "", view: "overview", metric: "total_with_cache", customStart: "", customEnd: "", search: "", sortKey: "", sortDirection: "desc", currentRows: [], data: null, sequence: 0, redrawAfter: 0, compact: false, pricingSettings: null, pricingDraftRows: [], source: "", rankPage: { provider: 0, model: 0 }, layout: "full", mini: false };
       const pricingRateFields = ["input", "output", "reasoning", "cache_read", "cache_write"];
       const metricKeys = { "总 Token":"total_with_cache", "请求次数":"requests", "输入 Token":"input_tokens", "输出 Token":"output_tokens", "推理 Token":"reasoning_tokens", "缓存命中":"cache_hit_tokens", "成本":"total_cost" };
       const tableConfig = {
@@ -744,7 +787,29 @@
       }, 12000);
       function cacheRate(summary) { const denominator = Number(summary.input_tokens || 0) + Number(summary.cache_read_tokens || 0); return denominator ? Number(summary.cache_read_tokens || 0) / denominator * 100 : 0; }
       function applyTheme(theme) { document.documentElement.dataset.theme = theme === "light" ? "light" : "dark"; $("#theme-button").title = theme === "light" ? "切换深色" : "切换浅色"; }
-      function updateLayout() { const dpr=window.devicePixelRatio||1; const effectiveWidth=window.innerWidth/dpr; const effectiveHeight=window.innerHeight/dpr; const compact = effectiveWidth < 760 || effectiveHeight < 680; if (compact !== state.compact) { state.compact = compact; document.body.dataset.layout = compact ? "compact" : "full"; if (state.data) { renderOptions(state.data.options); renderCurrent(); } } else document.body.dataset.layout = compact ? "compact" : "full"; if (state.data?.trend) scheduleChart(); }
+      // Three layouts, not two. The window has a hard minimum size, and at that size
+      // the compact layout still could not show the figures: the title, the
+      // period row, the filter row and the tabs each wrapped onto their own lines
+      // and pushed the hero card below the fold. Below the mini threshold the
+      // chrome goes and one card keeps the whole window, so the numbers are what
+      // the reader sees however small they drag the window.
+      function layoutFor(width, height) {
+        if (width < 480 || height < 520) return "mini";
+        if (width < 760 || height < 680) return "compact";
+        return "full";
+      }
+      function updateLayout() {
+        const dpr=window.devicePixelRatio||1;
+        const layout = layoutFor(window.innerWidth/dpr, window.innerHeight/dpr);
+        const compact = layout !== "full";
+        const mini = layout === "mini";
+        const changed = layout !== state.layout;
+        state.layout = layout; state.compact = compact; state.mini = mini;
+        document.body.dataset.layout = layout;
+        if (changed && state.data) { renderOptions(state.data.options); renderCurrent(); }
+        // The charts are not on screen in the mini layout, so they are not drawn.
+        if (state.data?.trend && !mini) scheduleChart();
+      }
       function renderOptions(options) {
         const providers = ["全部供应商", ...(options?.providers || [])];
         const models = ["全部模型", ...(options?.models || []).map(x => x.label)];
@@ -845,10 +910,14 @@
         // display the default window lands in the compact layout, so both charts
         // are drawn there as well. Without this the daily card only existed in
         // the full layout and was invisible at the default window size.
-        if(state.compact)drawChart($("#compact-trend-svg"), $("#compact-tooltip"), data.trend || []);
-        else drawChart($("#trend-svg"), $("#chart-tooltip"), data.trend || []);
-        drawChart($("#daily-trend-svg"), $("#daily-tooltip"), daily);
-        drawChart($("#compact-daily-svg"), $("#compact-daily-tooltip"), daily);
+        // The mini layout shows the hero card alone, with no charts on screen, so
+        // drawing into them would only cost time.
+        if(!state.mini){
+          if(state.compact)drawChart($("#compact-trend-svg"), $("#compact-tooltip"), data.trend || []);
+          else drawChart($("#trend-svg"), $("#chart-tooltip"), data.trend || []);
+          drawChart($("#daily-trend-svg"), $("#daily-tooltip"), daily);
+          drawChart($("#compact-daily-svg"), $("#compact-daily-tooltip"), daily);
+        }
       }
       // Only the top five are listed; the arrows walk through the rest. The
       // scale is taken from the largest entry overall rather than from the
