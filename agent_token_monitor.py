@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw
 APP_NAME = "Agent Token Monitor"
 APP_ID = "Agent.TokenMonitor"
 DATA_DIR_NAME = "AgentTokenMonitor"
-VERSION = "4.3.0"
+VERSION = "4.4.0"
 # Default window size. Chosen so the overview card, the period buttons and
 # both filter dropdowns are all visible without scrolling on a 1080p display.
 DEFAULT_WINDOW_WIDTH = 985
@@ -36,7 +36,9 @@ DEFAULT_WINDOW_HEIGHT = 975
 # The daily trend never shows less than this many days, however short the
 # selected period is. One day is a single dot, which is not a trend.
 DAILY_TREND_MIN_DAYS = 7
-ROLLING_TREND_STEP_MS = 86_400_000
+# The daily trend buckets by calendar day in local time: midnight to midnight.
+DAY_MS = 86_400_000
+DAY_BUCKET_SQL = "date(event_time / 1000, 'unixepoch', 'localtime')"
 # One set of token totals, shared by every grouped query, so the trend, the
 # rankings and the summary cannot drift apart on what counts as a request.
 USAGE_AGGREGATE_SQL = """
@@ -320,6 +322,16 @@ def local_day_bounds(ts_ms: int) -> tuple[str, int, int]:
     start = dt.replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + timedelta(days=1)
     return start.date().isoformat(), int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+
+
+def day_start_ms(ts_ms: int) -> int:
+    """Local midnight at or before ts_ms, as epoch milliseconds."""
+    return local_day_bounds(ts_ms)[1]
+
+
+def day_bucket_label(ts_ms: int) -> str:
+    """The calendar day an event belongs to, as YYYY-MM-DD in local time."""
+    return local_day_bounds(ts_ms)[0]
 
 
 def format_int(value: int | float) -> str:
@@ -1140,22 +1152,7 @@ class Store:
             cursor_dt += step
         return result
 
-    @staticmethod
-    def _rolling_bucket_bounds(start_ms: int, end_ms: int) -> tuple[int, int]:
-        """Align a window to whole 24 hour steps ending at end_ms.
-
-        Counting back from the end rather than forward from the start is what
-        makes the last bucket the trailing 24 hours, complete, instead of a day
-        that started at midnight and got cut off partway through.
-        """
-        span = end_ms - start_ms
-        # An exact multiple needs no extra bucket: two days of window is two
-        # buckets, not three. A window that is not a whole number of days still
-        # rounds up, so the trailing 24 hours is never cut short.
-        steps = max(1, -(-span // ROLLING_TREND_STEP_MS))
-        return end_ms - steps * ROLLING_TREND_STEP_MS, steps
-
-    def rolling_24h_trend(
+    def calendar_day_trend(
         self,
         start_ms: int,
         end_ms: int,
@@ -1164,58 +1161,39 @@ class Store:
         model_key: tuple[str, str, str] | None = None,
         source: str | None = None,
     ) -> list[dict[str, Any]]:
-        """A day-grained series where every point is a full 24 hours.
+        """A series of calendar days, local midnight to local midnight.
 
-        Calendar days are the obvious choice and the wrong one here: the day in
-        progress is short, so it sits beside several complete days and reads as
-        a drop in usage that never happened. Each bucket here spans exactly 24
-        hours, and the series ends at the moment of the query, so the points are
-        comparable with one another.
-
-        Buckets are labelled with the date they end on, which is the day the
-        trailing 24 hours mostly fall in.
+        The bucket label is the date, and the totals under it are that date's
+        usage and nothing else. Day in progress has its own elapsed hours so the
+        figure can be shown as partial instead of being mistaken for a full day.
         """
-        aligned_start, steps = self._rolling_bucket_bounds(start_ms, end_ms)
-        # The query is bounded by the aligned start, not the requested one. They
-        # differ whenever the window is not a whole number of days, and bounding
-        # by the requested start would leave the earliest bucket holding only the
-        # part of it that falls inside the window: a short day at the front, the
-        # very thing this series exists to avoid. Reaching back a few hours
-        # further costs nothing and keeps every bucket equal.
-        where, params = self._analytics_where(aligned_start, end_ms, provider_id, model_key, None, source)
+        first_day = day_start_ms(start_ms)
+        where, params = self._analytics_where(start_ms, end_ms, provider_id, model_key, None, source)
         rows = self.conn.execute(
             f"""
-            SELECT CAST((event_time - ?) / {ROLLING_TREND_STEP_MS} AS INTEGER) AS slot,{USAGE_AGGREGATE_SQL}
+            SELECT {DAY_BUCKET_SQL} AS bucket,{USAGE_AGGREGATE_SQL}
             FROM usage_events WHERE {where}
-            GROUP BY slot ORDER BY slot
+            GROUP BY bucket ORDER BY bucket
             """,
-            [aligned_start, *params],
+            params,
         ).fetchall()
-        by_slot = {safe_int(row["slot"]): dict(row) for row in rows}
+        by_bucket = {str(row["bucket"]): dict(row) for row in rows}
+        now = now_ms()
         result: list[dict[str, Any]] = []
-        for slot in range(steps):
-            # The bucket covers [aligned_start + slot*step, +step), so it is named
-            # for the day it finishes in.
-            label = datetime.fromtimestamp(
-                (aligned_start + (slot + 1) * ROLLING_TREND_STEP_MS) / 1000
-            ).astimezone().strftime("%Y-%m-%d")
-            row = by_slot.get(slot)
+        cursor = first_day
+        while cursor < end_ms:
+            label = datetime.fromtimestamp(cursor / 1000).astimezone().strftime("%Y-%m-%d")
+            row = by_bucket.get(label)
             if row is None:
                 row = {"bucket": label, **EMPTY_AGGREGATE_ROW}
-            else:
-                row["bucket"] = label
+            day_end = cursor + DAY_MS
+            row["partial"] = day_end > now
+            row["elapsed_hours"] = (
+                round(max(0.0, (min(now, day_end) - cursor) / 3_600_000), 2) if day_end > now else 24.0
+            )
             result.append(row)
+            cursor = day_end
         return result
-
-    @staticmethod
-    def rolling_bucket_label(event_ms: int, aligned_start_ms: int) -> str:
-        """The rolling bucket an event belongs to, for costing it on the way past."""
-        slot = (safe_int(event_ms) - aligned_start_ms) // ROLLING_TREND_STEP_MS
-        if slot < 0:
-            return ""
-        return datetime.fromtimestamp(
-            (aligned_start_ms + (slot + 1) * ROLLING_TREND_STEP_MS) / 1000
-        ).astimezone().strftime("%Y-%m-%d")
 
     def analytics(
         self,
@@ -3577,41 +3555,52 @@ class DashboardApi:
                 pricing_catalog, pricing_status = catalog.load()
             elif selected_pricing_mode == "custom":
                 pricing_status = {"source": "custom", "state": "enabled", "updated_at": now_ms()}
-            # The overview carries a second series where every point is a whole 24
-            # hours, ending now. Calendar days are the obvious bucket and the
-            # wrong one: the day in progress is short, so it sits beside complete
-            # days and reads as a drop in usage that never happened. Counting back
-            # from the current moment makes the newest point the trailing 24 hours
-            # and every point comparable with it.
+            # The overview carries a second series, day by calendar day, covering
+            # the window the period asks for. A day is a day: 00:00 to 24:00 in
+            # local time, so the number under 10-01 is the usage of 10-01 and
+            # nothing else. Rolling 24 hour windows were tried here and are wrong
+            # for a chart read this way, because the bucket labelled 10-01 runs
+            # from yesterday morning to this morning and its total has nothing to
+            # do with the day's figure shown beside it.
             #
-            # It also never shows less than a week, since one day is a single dot
-            # rather than a trend, and it stops at now so it never plots the future
-            # even when the chosen period runs to the end of today.
-            daily_end_ms = min(end_ms, now_ms())
+            # The day in progress is still short, so it is labelled as such and
+            # reported as such rather than being quietly re-based: the caption and
+            # the tooltip both say how much of it has elapsed.
             period_start_ms, _, _ = self._period_bounds(period, custom_start, custom_end)
-            requested_start_ms = period_start_ms if period_start_ms > 0 else daily_end_ms
-            daily_start_ms = min(requested_start_ms, daily_end_ms - DAILY_TREND_MIN_DAYS * ROLLING_TREND_STEP_MS)
-            aligned_start_ms, _ = store._rolling_bucket_bounds(daily_start_ms, daily_end_ms)
-            daily_trend = store.rolling_24h_trend(
-                aligned_start_ms,
-                daily_end_ms,
+            # Stop at the end of today, so a period that runs to midnight never
+            # plots a day that has not happened yet.
+            today_end_ms = min(end_ms, day_start_ms(now_ms()) + DAY_MS)
+            floor_ms = today_end_ms - DAILY_TREND_MIN_DAYS * DAY_MS
+            requested_start_ms = period_start_ms if period_start_ms > 0 else today_end_ms
+            daily_start_ms = min(requested_start_ms, floor_ms)
+            daily_trend = store.calendar_day_trend(
+                daily_start_ms,
+                today_end_ms,
                 provider_id=provider or None,
                 model_key=model_key,
                 source=source or None,
             )
-            # The 24 hour series usually reaches further back than the period it
-            # sits beside, so the scan is widened to cover both and then split.
-            # The split mirrors the SQL exactly: event_time >= start and < end.
-            # Widening by a few steps over a long period costs nothing, because
-            # there are no events in the part of the period after now.
-            costing_rows = store.costing_rows(aligned_start_ms, end_ms, provider or None, model_key, source=source or None)
+            # Whether the newest bucket is a day still in progress, and how much
+            # of it has elapsed. Without this the partial day reads as a fall in
+            # usage rather than as a day that has not finished.
+            daily_partial = bool(daily_trend) and (
+                day_start_ms(now_ms()) < today_end_ms <= day_start_ms(now_ms()) + DAY_MS
+            )
+            daily_elapsed_hours = (
+                max(0.0, (now_ms() - day_start_ms(now_ms())) / 3_600_000) if daily_partial else 24.0
+            )
+            # The scan is widened to cover both windows and then split. The split
+            # mirrors the SQL exactly: event_time >= start and < end. Widening by
+            # a few days over a long period costs nothing, because there are no
+            # events between the end of today and the end of the period.
+            costing_rows = store.costing_rows(daily_start_ms, end_ms, provider or None, model_key, source=source or None)
             period_rows = [row for row in costing_rows if start_ms <= safe_int(row["event_time"]) < end_ms]
-            bucket_of = lambda event_ms: store.rolling_bucket_label(event_ms, aligned_start_ms)
-            # Separate passes for the period and for the 24 hour series, because
-            # the period's summary must not pick up the days the series reaches
-            # back into, and the two are keyed on different buckets. The pricing
-            # itself is pure arithmetic over rows already in hand, and the
-            # overlap is only as large as the part of the period before now.
+            bucket_of = day_bucket_label
+            # Separate passes for the period and for the daily series, because the
+            # period's summary must not pick up the days the series reaches back
+            # into, and the two are keyed on different buckets. The pricing itself
+            # is pure arithmetic over rows already in hand, and the overlap is
+            # only as large as the part of the period before now.
             attach_model_dev_costs(analytics, period_rows, pricing_catalog, config)
             attach_model_dev_costs(
                 {
@@ -3702,6 +3691,11 @@ class DashboardApi:
                 "summary": analytics["summary"],
                 "trend": analytics["trend"],
                 "daily_trend": daily_trend,
+                # Whether the newest daily bucket is still filling, so the caption
+                # can say so instead of leaving a partial day to look like a fall
+                # in usage.
+                "daily_partial": daily_partial,
+                "daily_elapsed_hours": daily_elapsed_hours,
                 "granularity": analytics["granularity"],
                 "providers": analytics["providers"],
                 "models": analytics["models"],

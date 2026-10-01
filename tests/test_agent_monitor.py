@@ -1292,24 +1292,27 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(module.interpolate_color(0, 100_000_000)[:3], (34, 178, 95))
         self.assertEqual(module.interpolate_color(100_000_000, 100_000_000)[:3], (220, 38, 38))
 
-    def test_daily_trend_buckets_are_whole_24_hours(self) -> None:
-        """Every point on the daily trend is a full 24 hours, newest first among equals.
+    def test_daily_trend_buckets_are_calendar_days(self) -> None:
+        """Each point is one calendar day, midnight to midnight, in local time.
 
-        Calendar days are the obvious bucket and the wrong one. The day in
-        progress is short, so it sits beside complete days and reads as a drop in
-        usage that never happened. The buckets here are counted back from the end
-        of the window, which makes the newest point the trailing 24 hours and
-        every other point the same length.
+        The number under a date has to be that date's usage and nothing else.
+        Buckets of a rolling 24 hours were tried here and are wrong for a chart
+        read this way: the bucket labelled 10-01 runs from the previous morning
+        to this one, so its total has nothing to do with the day shown beside it.
+
+        The day in progress is genuinely shorter than the others, so it is
+        flagged with how much of it has elapsed rather than being padded out or
+        quietly re-based.
         """
         day = 86_400_000
         with tempfile.TemporaryDirectory() as temp:
             store = module.Store(Path(temp))
             try:
-                # The start of the trailing 24 hours, which is also the anchor the
-                # buckets are aligned to.
-                anchor = int(dt.datetime(2026, 3, 10, 15, 0).timestamp() * 1000)
+                # Four events per day, at 03:00, 09:00, 15:00 and 21:00 across
+                # three days, so a whole calendar day holds four.
+                first = dt.datetime(2026, 3, 10, 3, 0)
                 for step in range(12):
-                    when = anchor + step * 6 * 3_600_000
+                    when = int((first + dt.timedelta(hours=6 * step)).timestamp() * 1000)
                     store.upsert_event(module.UsageRecord(
                         message_id=f"h{step}", source="v2", source_rank=2, session_id="s",
                         project_id="p", project_name="p", project_path="p",
@@ -1319,54 +1322,78 @@ class MonitorTests(unittest.TestCase):
                         cache_read_tokens=0, cache_write_tokens=0, cost=2.0,
                     ))
                 store.conn.commit()
-                end = anchor + 3 * day
+                lo = int(dt.datetime(2026, 3, 10, 0, 0).timestamp() * 1000)
+                hi = int(dt.datetime(2026, 3, 13, 0, 0).timestamp() * 1000)
 
-                rows = store.rolling_24h_trend(end - 3 * day, end)
-                aligned, steps = store._rolling_bucket_bounds(end - 3 * day, end)
-                self.assertEqual(len(rows), steps)
-                # Four events every six hours, so a whole bucket holds four and a
-                # partial one would hold fewer.
-                self.assertEqual([row["requests"] for row in rows], [4, 4, 4])
-                # A bucket is named for the day it ends on, and the first bucket
-                # opens exactly on the aligned start.
+                rows = store.calendar_day_trend(lo, hi)
                 self.assertEqual([row["bucket"] for row in rows],
-                                 ["2026-03-11", "2026-03-12", "2026-03-13"])
-                # The same events read as calendar days come out uneven, which is
-                # the artefact this series exists to remove.
-                by_day: dict[str, int] = {}
-                for step in range(12):
-                    key = dt.datetime.fromtimestamp(
-                        (anchor + step * 6 * 3_600_000) / 1000).astimezone().strftime("%Y-%m-%d")
-                    by_day[key] = by_day.get(key, 0) + 1
-                self.assertEqual([by_day[key] for key in sorted(by_day)], [2, 4, 4, 2])
+                                 ["2026-03-10", "2026-03-11", "2026-03-12"])
+                self.assertEqual([row["requests"] for row in rows], [4, 4, 4])
 
-                # A window that is not a whole number of days is still filled with
-                # whole buckets, including the first one. Bounding the query by the
-                # unaligned start instead would leave the earliest bucket short.
-                rows = store.rolling_24h_trend(end - int(1.5 * day), end)
-                self.assertEqual([row["requests"] for row in rows], [4, 4])
-                # Starting the window away from midnight changes nothing.
-                self.assertEqual([row["requests"] for row in store.rolling_24h_trend(anchor, anchor + 3 * day)],
-                                 [4, 4, 4])
-                # Costs are keyed on the buckets of the window they are costing,
-                # so a row and the events in it agree, and an event from before the
-                # window belongs to no bucket at all.
-                for start, window in ((end - 3 * day, None), (end - int(1.5 * day), None)):
-                    start_aligned, _ = store._rolling_bucket_bounds(start, end)
-                    series = store.rolling_24h_trend(start, end)
-                    self.assertEqual(store.rolling_bucket_label(start, start_aligned), series[0]["bucket"])
-                    self.assertEqual(store.rolling_bucket_label(start - day, start_aligned), "")
-                    # Every event in the window lands in a bucket the series has.
-                    inside = [store.rolling_bucket_label(row["event_time"], start_aligned)
-                              for row in store.costing_rows(start_aligned, end)]
-                    self.assertTrue(all(label in {row["bucket"] for row in series} for label in inside))
+                # The bucket label is the day an event falls in, so the total
+                # under a date is exactly that day's usage.
+                self.assertEqual(module.day_bucket_label(lo), "2026-03-10")
+                self.assertEqual(module.day_bucket_label(hi - 1), "2026-03-12")
+                for row in rows:
+                    day_lo = module.day_start_ms(
+                        int(dt.datetime.strptime(row["bucket"], "%Y-%m-%d").timestamp() * 1000))
+                    counted = store.conn.execute(
+                        "SELECT COUNT(*) FROM usage_events WHERE event_time >= ? AND event_time < ?",
+                        (day_lo, day_lo + day)).fetchone()[0]
+                    self.assertEqual(row["requests"], counted,
+                                     f"{row['bucket']} does not match a direct count of that day")
 
-                # The filters reach it, and an empty window still gives a point.
+                # A window that starts partway through a day still opens at that
+                # day's midnight, so no day is silently dropped.
+                rows = store.calendar_day_trend(
+                    int(dt.datetime(2026, 3, 11, 17, 0).timestamp() * 1000), hi)
+                self.assertEqual([row["bucket"] for row in rows], ["2026-03-11", "2026-03-12"])
+
+                # A day with no usage is kept at zero, so the line has no gap.
+                rows = store.calendar_day_trend(
+                    int(dt.datetime(2026, 3, 8, 0, 0).timestamp() * 1000), hi)
+                self.assertEqual([row["requests"] for row in rows], [0, 0, 4, 4, 4])
+
+                # The filters reach it, and an empty window still gives a day.
                 self.assertEqual(
-                    [row["requests"] for row in store.rolling_24h_trend(anchor, anchor + day, provider_id="nobody")],
-                    [0],
+                    [row["requests"] for row in store.calendar_day_trend(lo, hi, provider_id="nobody")],
+                    [0, 0, 0],
                 )
-                self.assertEqual(len(store.rolling_24h_trend(anchor, anchor)), 1)
+                self.assertEqual(len(store.calendar_day_trend(lo, lo)), 0)
+                self.assertEqual(len(store.calendar_day_trend(lo, lo + day)), 1)
+            finally:
+                store.close()
+
+    def test_a_day_in_progress_is_reported_as_partial(self) -> None:
+        """A day that has not finished says how much of it has elapsed.
+
+        Left unmarked, a day that is nine hours old sits beside complete days and
+        reads as a collapse in usage. The flag is what the hollow chart point and
+        the tooltip note are drawn from.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            store = module.Store(Path(temp))
+            try:
+                now = module.now_ms()
+                today = module.day_start_ms(now)
+                store.upsert_event(module.UsageRecord(
+                    message_id="a", source="v2", source_rank=2, session_id="s",
+                    project_id="p", project_name="p", project_path="p",
+                    provider_id="alpha", model_id="m1", variant="high", agent="",
+                    event_time=now - 60_000, source_created=now - 60_000,
+                    source_updated=now - 60_000, input_tokens=10, output_tokens=0,
+                    reasoning_tokens=0, cache_read_tokens=0, cache_write_tokens=0, cost=0.0,
+                ))
+                store.conn.commit()
+                rows = store.calendar_day_trend(today - 2 * 86_400_000, today + 86_400_000)
+                self.assertEqual(len(rows), 3)
+                self.assertEqual([row["partial"] for row in rows], [False, False, True])
+                # A finished day reports a whole 24, the day in progress its own
+                # elapsed hours, and never more than a day.
+                self.assertEqual(rows[0]["elapsed_hours"], 24.0)
+                self.assertTrue(0 < rows[2]["elapsed_hours"] < 24.0)
+                for row in rows:
+                    self.assertLessEqual(row["elapsed_hours"], 24.0)
             finally:
                 store.close()
 
@@ -1497,10 +1524,12 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(len(thirty["daily_trend"]), 30)
             self.assertEqual(len(seven["daily_trend"]), 7)
             self.assertEqual(len(week["daily_trend"]), module.DAILY_TREND_MIN_DAYS)
-            # A custom range that ends in the past is not pushed forward to now:
-            # the newest bucket ends the day after the range does, because a
-            # bucket is named for the day it finishes in.
-            self.assertEqual(week["daily_trend"][-1]["bucket"], "2026-09-04")
+            # A custom range that ends in the past stays in the past, and its
+            # last bucket is the last day the range covers rather than the day
+            # after it.
+            self.assertEqual(week["daily_trend"][-1]["bucket"], "2026-09-03")
+            # Nothing in a period that closed days ago is still filling.
+            self.assertFalse(any(row["partial"] for row in week["daily_trend"]))
 
     def test_daily_trend_costs_ride_the_existing_pricing_pass(self) -> None:
         """The daily rows must carry the same cost fields as the trend beside them.
@@ -1524,11 +1553,11 @@ class MonitorTests(unittest.TestCase):
                         cache_read_tokens=0, cache_write_tokens=0, cost=0.0,
                     ))
                 store.conn.commit()
-                end = anchor + 2 * 86_400_000
+                end = module.day_start_ms(anchor) + 2 * 86_400_000
                 rows = store.costing_rows(anchor, end)
                 analytics = store.analytics(anchor, end, granularity="hour", event_limit=0)
-                daily_rows = store.rolling_24h_trend(anchor, end)
-                bucket_of = lambda event_ms: store.rolling_bucket_label(event_ms, anchor)
+                daily_rows = store.calendar_day_trend(anchor, end)
+                bucket_of = module.day_bucket_label
                 module.attach_model_dev_costs(
                     analytics, rows, {}, {}, daily_rows, bucket_of,
                 )
@@ -1544,6 +1573,44 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(fields(plain["trend"][0]), fields(analytics["trend"][0]))
             finally:
                 store.close()
+
+    def test_refreshing_does_not_cover_the_page(self) -> None:
+        """A reload must not blank the numbers the reader is watching.
+
+        Refreshing raised a full-screen scrim over the whole viewport, so the
+        window went blank and the existing figures disappeared while it worked.
+        The wait is now a two pixel bar at the top edge, which covers nothing and
+        never intercepts a click, plus the refresh button spinning on its own.
+
+        A background reload shows neither: the page updates underneath the
+        reader, which is the whole point of a counter that refreshes itself.
+        """
+        html = (Path(module.__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+        rule = re.search(r"\.loading \{[^}]*\}", html)
+        self.assertIsNotNone(rule, ".loading rule not found")
+        style = rule.group(0)
+        # A thin bar along the top, not a sheet over the viewport.
+        self.assertIn("top: 0", style)
+        self.assertIn("height: 2px", style)
+        self.assertNotIn("inset: 0", style)
+        # It must never take clicks, in either state.
+        self.assertIn("pointer-events: none", style)
+        self.assertNotIn("backdrop-filter", style)
+        self.assertNotIn("place-items: center", style)
+        # The refresh button says it is working, and cannot be pressed twice.
+        self.assertIn("const busyRefresh = (show) => $(\"#refresh-button\").classList.toggle(\"busy\", !!show);", html)
+        self.assertIn(".icon-button.busy { pointer-events: none;", html)
+        self.assertIn(".icon-button.busy .icon { animation: spin .7s linear infinite; }", html)
+        # The busy state is cleared on every path out, including a failure.
+        self.assertIn("finally{if(sequence===state.sequence){showLoading(false); busyRefresh(false);}}", html)
+        self.assertIn("finally{showLoading(false); busyRefresh(false);}", html)
+        # A background reload is silent; only a deliberate one shows the bar.
+        self.assertIn("const quiet=state.data&&!force; showLoading(!quiet);", html)
+        # The deliberate paths ask for it.
+        self.assertIn("$(\"#refresh-button\").addEventListener(\"click\",async()=>{showLoading(true); busyRefresh(true);", html)
+        self.assertIn("await loadView(true);", html)
+        # The spinner that used to be centred is no longer the loading mark.
+        self.assertNotIn('<div id="loading" class="loading"><div class="loading-mark"></div></div>', html)
 
     def test_trend_is_drawn_as_a_monotone_curve(self) -> None:
         """The line chart bends without inventing peaks.
@@ -1584,11 +1651,23 @@ class MonitorTests(unittest.TestCase):
         # check: one per layout. Matching title plus caption as a single string
         # would also pass if the caption sat in the wrong card.
         self.assertEqual(html.count('<h2 class="section-title">最近每日趋势</h2>'), 2)
-        self.assertIn('<div id="compact-daily-caption" class="section-subtitle">每点 24 小时</div>', html)
+        self.assertIn('<div id="compact-daily-caption" class="section-subtitle">每天 0–24 点</div>', html)
         self.assertIn('id="compact-daily-svg"', html)
         self.assertIn('id="compact-daily-tooltip"', html)
         self.assertIn('drawChart($("#compact-daily-svg"), $("#compact-daily-tooltip"), daily)', html)
-        self.assertIn('setText("#compact-daily-caption", `每点 24 小时 · 共 ${days?days:0} 天`);', html)
+        self.assertIn('setText("#compact-daily-caption", `每天 0–24 点 · 共 ${days?days:0} 天${note}`);', html)
+        # The caption names the bucketing, and says so when the newest day is
+        # still filling rather than leaving a short day to look like a drop.
+        self.assertIn(
+            'const note=data.daily_partial ? ` · 今天进行中（已过 ${Number(data.daily_elapsed_hours||0).toFixed(0)} 小时）` : "";',
+            html,
+        )
+        self.assertIn('setText("#daily-trend-caption", `每天 0–24 点 · 共 ${days?days:0} 天${note} · 指标同上方`);', html)
+        # A bucket the backend flagged as still filling is drawn hollow, and the
+        # tooltip says how far into the day it is.
+        self.assertIn("rows[i]?.partial?", html)
+        self.assertIn('class="chart-point-warming"', html)
+        self.assertIn("本日进行中 · 已过 ${Number(row.elapsed_hours||0).toFixed(1)} 小时，非完整一天", html)
         self.assertIn(".chart-wrap.daily-chart { height: 224px; }", html)
         # An unsized svg falls back to the 300x150 default while its viewBox is
         # measured from the full card, so the drawing gets clipped. Every chart
@@ -1612,10 +1691,6 @@ class MonitorTests(unittest.TestCase):
         # Rendered from the series the backend sends, with its own tooltip.
         self.assertIn('drawChart($("#daily-trend-svg"), $("#daily-tooltip"), daily)', html)
         self.assertIn("const daily=data.daily_trend||[]", html)
-        # The caption states that a point is 24 hours rather than a calendar day,
-        # which is what makes the points comparable with one another.
-        self.assertIn("const daily=data.daily_trend||[]", html)
-        self.assertIn('setText("#daily-trend-caption", `每点 24 小时 · 共 ${days?days:0} 天 · 指标同上方`);', html)
         # The card lives in the full overview, which the compact layout hides,
         # so the compact layout carries its own copy of both charts.
         self.assertIn('body[data-layout="compact"] .full-overview { display: none; }', html)
