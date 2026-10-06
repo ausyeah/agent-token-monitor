@@ -3364,6 +3364,69 @@ def close_stale_dashboards(logger: logging.Logger | None = None) -> int:
         return 0
 
 
+def kill_orphan_dashboards(logger: logging.Logger | None = None) -> int:
+    """Terminate orphan/headless processes of this executable when no window can be restored."""
+    if os.name != "nt":
+        return 0
+    own_pid = os.getpid()
+    exe_path = Path(sys.executable).resolve()
+    exe_name = exe_path.name.lower()
+    if not exe_name.endswith(".exe") or "python" in exe_name:
+        return 0
+    terminated = 0
+    try:
+        kernel32 = ctypes.windll.kernel32
+        TH32CS_SNAPPROCESS = 0x00000002
+        h_snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if h_snap == -1:
+            return 0
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.c_ulong),
+                ("cntUsage", ctypes.c_ulong),
+                ("th32ProcessID", ctypes.c_ulong),
+                ("th32DefaultHeapID", ctypes.c_void_p),
+                ("th32ModuleID", ctypes.c_ulong),
+                ("cntThreads", ctypes.c_ulong),
+                ("th32ParentProcessID", ctypes.c_ulong),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", ctypes.c_ulong),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        candidates: list[int] = []
+        if kernel32.Process32FirstW(h_snap, ctypes.byref(entry)):
+            while True:
+                if entry.th32ProcessID != own_pid and entry.szExeFile.lower() == exe_name:
+                    candidates.append(int(entry.th32ProcessID))
+                if not kernel32.Process32NextW(h_snap, ctypes.byref(entry)):
+                    break
+        kernel32.CloseHandle(h_snap)
+
+        for pid in candidates:
+            h_proc = kernel32.OpenProcess(0x1001, False, pid)  # PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION
+            if not h_proc:
+                continue
+            try:
+                size = ctypes.c_ulong(1024)
+                buf = ctypes.create_unicode_buffer(1024)
+                if kernel32.QueryFullProcessImageNameW(h_proc, 0, buf, ctypes.byref(size)):
+                    if Path(buf.value).resolve() == exe_path:
+                        kernel32.TerminateProcess(h_proc, 1)
+                        terminated += 1
+                        if logger:
+                            logger.info("Terminated orphan Dashboard process PID %d", pid)
+            finally:
+                kernel32.CloseHandle(h_proc)
+    except Exception as exc:
+        if logger:
+            logger.debug("kill_orphan_dashboards skipped: %s", exc)
+    return terminated
+
+
 def tray_instance_exists() -> bool:
     """Check the tray singleton without taking ownership of its mutex."""
     if os.name != "nt":
@@ -4465,7 +4528,12 @@ def run_dashboard(config_path: Path) -> int:
             return 0
         logger.warning("Another Dashboard instance holds the lock; no window to restore, retrying")
         close_stale_dashboards(logger)
-        guard = acquire_named_mutex(DASHBOARD_MUTEX_NAME, timeout_ms=500)
+        guard = acquire_named_mutex(DASHBOARD_MUTEX_NAME, timeout_ms=300)
+        if guard is None:
+            killed = kill_orphan_dashboards(logger)
+            if killed > 0:
+                time.sleep(0.2)
+                guard = acquire_named_mutex(DASHBOARD_MUTEX_NAME, timeout_ms=1000)
         if guard is None:
             _report_startup_failure(
                 f"另一个 {APP_NAME} 进程正占用 Dashboard 锁。\n\n"
@@ -4473,7 +4541,11 @@ def run_dashboard(config_path: Path) -> int:
             )
             return 0
 
-    ensure_tray_running(config_path)
+    def _delayed_tray() -> None:
+        time.sleep(2.0)
+        ensure_tray_running(config_path)
+
+    threading.Thread(target=_delayed_tray, daemon=True, name="DelayedTray").start()
 
     # Disable Chromium GPU hardware acceleration to avoid black-screen / blank window bugs on Windows
     args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
@@ -4601,7 +4673,6 @@ def main(argv: list[str] | None = None) -> int:
     if command == "tray":
         return run_tray(args.config)
     if command is None:
-        ensure_tray_running(args.config)
         return run_dashboard(args.config)
 
     config = load_config(args.config)
