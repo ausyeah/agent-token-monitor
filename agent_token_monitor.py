@@ -3204,6 +3204,20 @@ def install_startup(config_path: Path) -> None:
     run_startup_command(command)
 
 
+def ensure_interactive_desktop() -> None:
+    """Ensure the current thread is attached to the interactive user desktop so that
+    tray icons (Shell_NotifyIcon) and windows are visible to the logged-in user."""
+    if os.name != "nt":
+        return
+    try:
+        user32 = ctypes.windll.user32
+        h_default = user32.OpenDesktopW("default", 0, False, 0x01FF)
+        if h_default:
+            user32.SetThreadDesktop(h_default)
+    except Exception:
+        pass
+
+
 def acquire_named_mutex(name: str, timeout_ms: int = 15_000) -> int | None:
     if os.name != "nt":
         return 0
@@ -3277,7 +3291,7 @@ def status_text(status: dict[str, Any], maximum: float) -> str:
 
 
 def show_existing_dashboard() -> bool:
-    """Focus an already-running Dashboard window, if present and visible."""
+    """Restore and focus an already-running Dashboard window, if present."""
     if os.name != "nt":
         return False
     try:
@@ -3285,10 +3299,7 @@ def show_existing_dashboard() -> bool:
         hwnd = user32.FindWindowW(None, f"{APP_NAME} {VERSION}")
         if not hwnd:
             return False
-        if not user32.IsWindowVisible(hwnd):
-            user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE stale/hidden window
-            return False
-        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE reveals both minimized and hidden windows
         user32.SetForegroundWindow(hwnd)
         return True
     except (AttributeError, OSError):
@@ -3472,6 +3483,7 @@ def open_dashboard(config_path: Path) -> None:
 
 
 def run_tray(config_path: Path) -> int:
+    ensure_interactive_desktop()
     try:
         import pystray  # type: ignore
     except ImportError as exc:
@@ -3626,6 +3638,8 @@ def run_tray(config_path: Path) -> int:
 
     def quit_app(_icon: Any = None, _item: Any = None) -> None:
         stop_event.set()
+        if os.name == "nt":
+            kill_orphan_dashboards(logger)
         icon.stop()
 
     def menu() -> Any:
@@ -3668,8 +3682,13 @@ def run_tray(config_path: Path) -> int:
 
     icon.menu = menu()
     threading.Thread(target=worker, daemon=True).start()
+
+    def _on_setup(i: Any) -> None:
+        ensure_interactive_desktop()
+        i.visible = True
+
     try:
-        icon.run()
+        icon.run(setup=_on_setup)
     finally:
         stop_event.set()
         if mutex is not None:
@@ -4512,6 +4531,7 @@ def _report_startup_failure(message: str) -> None:
 
 
 def run_dashboard(config_path: Path) -> int:
+    ensure_interactive_desktop()
     logger = setup_logging(app_data_dir())
     # Windows left over by an older build are never matched by the exact-title
     # lookup below, so remove them first.
@@ -4541,65 +4561,7 @@ def run_dashboard(config_path: Path) -> int:
             )
             return 0
 
-    tray_icon: Any = None
-    if os.name == "nt" and not tray_instance_exists():
-        try:
-            import pystray  # type: ignore
-            config = load_config(config_path)
-            maximum = max(1, safe_int(config.get("color_max_tokens", 100_000_000)))
-            initial_icon = make_icon(0, maximum) if any_source_running() else make_idle_icon()
-
-            def _open_dash(_i: Any = None, _item: Any = None) -> None:
-                show_existing_dashboard()
-
-            def _quit_all(_i: Any = None, _item: Any = None) -> None:
-                if tray_icon:
-                    try:
-                        tray_icon.stop()
-                    except Exception:
-                        pass
-                if DASHBOARD_WINDOW:
-                    try:
-                        DASHBOARD_WINDOW.destroy()
-                    except Exception:
-                        pass
-                os._exit(0)
-
-            tray_icon = pystray.Icon(
-                APP_ID,
-                initial_icon,
-                APP_NAME,
-                menu=pystray.Menu(
-                    pystray.MenuItem("打开仪表盘", _open_dash, default=True),
-                    pystray.MenuItem("退出", _quit_all),
-                ),
-            )
-            threading.Thread(target=tray_icon.run, daemon=True, name="DashboardTray").start()
-
-            def _tray_updater() -> None:
-                while tray_icon:
-                    try:
-                        cfg = load_config(config_path)
-                        max_tokens = max(1, safe_int(cfg.get("color_max_tokens", 100_000_000)))
-                        st_monitor = Monitor(cfg, app_data_dir(), logger)
-                        try:
-                            st = st_monitor.current_status()
-                        finally:
-                            st_monitor.close()
-                        if any_source_running():
-                            val = safe_int(st["today"]["total_with_cache"])
-                            err = bool(st["last_error"])
-                            tray_icon.icon = make_icon(val, max_tokens, err)
-                        else:
-                            tray_icon.icon = make_idle_icon()
-                        tray_icon.title = status_text(st, max_tokens)
-                    except Exception:
-                        pass
-                    time.sleep(5.0)
-
-            threading.Thread(target=_tray_updater, daemon=True, name="TrayUpdater").start()
-        except Exception as exc:
-            logger.debug("In-process tray icon setup skipped: %s", exc)
+    ensure_tray_running(config_path)
 
     # Disable Chromium GPU hardware acceleration to avoid black-screen / blank window bugs on Windows
     args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
@@ -4646,6 +4608,18 @@ def run_dashboard(config_path: Path) -> int:
     global DASHBOARD_WINDOW
     DASHBOARD_WINDOW = window
 
+    tray_start_attempted = False
+
+    def hide_to_tray() -> bool:
+        nonlocal tray_start_attempted
+        if not tray_start_attempted:
+            ensure_tray_running(config_path)
+            tray_start_attempted = True
+        window.hide()
+        return False
+
+    window.events.closing += hide_to_tray
+
     try:
         webview.start(debug=False, gui="edgechromium")
     except Exception as exc:
@@ -4653,11 +4627,6 @@ def run_dashboard(config_path: Path) -> int:
         _report_startup_failure(f"仪表盘启动异常: {exc}")
         return 1
     finally:
-        if tray_icon:
-            try:
-                tray_icon.stop()
-            except Exception:
-                pass
         release_named_mutex(guard)
     return 0
 
@@ -4718,6 +4687,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    ensure_interactive_desktop()
     parser = build_parser()
     args = parser.parse_args(argv)
     command = args.command
