@@ -325,6 +325,9 @@
     .pricing-footer-note { color: var(--muted); font-size: 10px; }
     .pricing-footer-actions { display: flex; gap: 8px; }
     .pricing-empty { padding: 20px; text-align: center; color: var(--muted); border: 1px dashed var(--border); border-radius: 12px; }
+    .settings-checkbox-grid { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; padding: 4px 0; }
+    .settings-checkbox-label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; user-select: none; color: var(--text-soft); }
+    .settings-checkbox-label input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
     @media (max-width: 900px) {
       .compact-breakdown-grid { grid-template-columns: 1fr; }
       .pricing-mode-grid { grid-template-columns: 1fr; }
@@ -421,8 +424,10 @@
       body[data-layout="compact"] .eyebrow { font-size: 9px; margin-bottom: 4px; }
       body[data-layout="compact"] .hero-copy { display: none; }
       body[data-layout="compact"] .top-actions .soft-button { display: none; }
-      body[data-layout="compact"] .top-actions #pricing-button { display: inline-flex; padding: 0 11px; }
-      body[data-layout="compact"] .top-actions #pricing-button span { display: none; }
+      body[data-layout="compact"] .top-actions #pricing-button,
+      body[data-layout="compact"] .top-actions #settings-button { display: inline-flex; padding: 0 11px; }
+      body[data-layout="compact"] .top-actions #pricing-button span,
+      body[data-layout="compact"] .top-actions #settings-button span { display: none; }
       body[data-layout="compact"] .control-bar { padding: 7px; border-radius: 16px; margin-bottom: 9px; gap: 8px; }
       /* Period pills wrap onto a second row instead of scrolling behind a
          visible scrollbar, which read as a broken control at narrow widths. */
@@ -542,6 +547,7 @@
         <button id="export-button" class="soft-button"><svg class="icon" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg><span>导出 CSV</span></button>
         <button id="data-button" class="soft-button"><svg class="icon" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3Z"/></svg><span>数据目录</span></button>
         <button id="pricing-button" class="soft-button"><svg class="icon" viewBox="0 0 24 24"><path d="M12 3v18M17 7.5c0-1.4-2-2.5-5-2.5S7 6.1 7 7.5 9 10 12 10s5 1.1 5 2.5-2 2.5-5 2.5-5-1.1-5-2.5"/></svg><span>价格设置</span></button>
+        <button id="settings-button" class="soft-button" title="打开系统与自启动设置"><svg class="icon" viewBox="0 0 24 24"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg><span>系统设置</span></button>
         <button id="currency-button" class="soft-button" title="切换显示货币"><span id="currency-label">$</span></button>
       </div>
     </header>
@@ -566,7 +572,7 @@
       <div class="filter-field" id="model-field"><label for="model-filter">模型</label><select id="model-filter"><option>全部模型</option></select></div>
       <div class="filter-field" id="source-field"><select id="source-filter" aria-label="数据来源"><option value="">全部来源</option></select></div>
       <button id="reset-button" class="soft-button">重置筛选</button>
-      <div class="control-quick-actions"><button id="pricing-quick-button" class="quick-button" title="打开价格设置">价格</button><button id="currency-quick-button" class="quick-button" title="切换美元/人民币">$</button></div>
+      <div class="control-quick-actions"><button id="settings-quick-button" class="quick-button" title="打开系统设置">设置</button><button id="pricing-quick-button" class="quick-button" title="打开价格设置">价格</button><button id="currency-quick-button" class="quick-button" title="切换美元/人民币">$</button></div>
     </section>
     <button id="active-filter-summary" class="active-filter-summary" hidden></button>
     <div id="source-warning" class="source-warning" hidden></div>
@@ -681,6 +687,47 @@
     </div>
     <div class="pricing-footer"><div class="pricing-footer-note" id="pricing-status-note">保存后 Dashboard 会按新价格重新计算。</div><div class="pricing-footer-actions"><button id="pricing-reset" class="soft-button">恢复官方价格</button><button id="pricing-cancel" class="soft-button">取消</button><button id="pricing-save" class="primary-button">保存并重新计算</button></div></div>
   </section>
+  <div id="settings-backdrop" class="pricing-backdrop" hidden></div>
+  <section id="settings-modal" class="pricing-dialog" hidden aria-label="系统与自启动设置">
+    <div class="pricing-head"><div><div class="eyebrow">Settings & Preferences</div><h2>系统设置</h2><div class="pricing-subtitle">配置开机启动模式、伴随启动行为、告警阈值及监控参数。</div></div><button id="settings-close" class="icon-button" aria-label="关闭">×</button></div>
+    <div class="pricing-body">
+      <section class="pricing-section">
+        <div class="pricing-section-title">自启动选项</div>
+        <div class="pricing-section-note">选择 Agent Token Monitor 在 Windows 系统中的启动与唤醒策略。</div>
+        <div class="pricing-mode-grid">
+          <button type="button" class="pricing-mode settings-mode" data-startup-mode="boot"><strong>开机自动启动</strong><span>系统登录后自动在托盘后台运行，常驻监控所有支持的 AI 工具。</span></button>
+          <button type="button" class="pricing-mode settings-mode" data-startup-mode="companion"><strong>伴随 AI 工具启动</strong><span>开机静默待命，当检测到受监控的 AI 工具（OpenCode、Codex、Antigravity 等）启动时自动激活托盘监控并开始记录。</span></button>
+          <button type="button" class="pricing-mode settings-mode" data-startup-mode="none"><strong>不自动启动</strong><span>不写入系统启动项，仅在您手动双击快捷方式或命令行打开时运行。</span></button>
+        </div>
+      </section>
+      <section class="pricing-section">
+        <div class="pricing-section-title">告警阈值</div>
+        <div class="pricing-section-note">当单日累计或短时间突增超过设定的 Token 阈值时触发系统提示。</div>
+        <div class="pricing-inline" style="flex-wrap:wrap">
+          <div class="pricing-field" style="width:200px"><label for="settings-daily-alert">每日告警阈值 (Token)</label><input id="settings-daily-alert" type="number" min="1000" step="1000000" value="10000000"></div>
+          <div class="pricing-field" style="width:200px"><label for="settings-spike-alert">突增告警阈值 (Token)</label><input id="settings-spike-alert" type="number" min="1000" step="1000000" value="10000000"></div>
+          <div class="pricing-field" style="width:160px"><label for="settings-spike-window">突增计算窗口 (分钟)</label><input id="settings-spike-window" type="number" min="1" max="1440" step="5" value="30"></div>
+        </div>
+      </section>
+      <section class="pricing-section">
+        <div class="pricing-section-title">提醒方式</div>
+        <div class="pricing-section-note">自定义触发告警时的桌面通知与声音提示。</div>
+        <div class="settings-checkbox-grid">
+          <label class="settings-checkbox-label"><input id="settings-notifications" type="checkbox"><span>启用桌面气泡通知</span></label>
+          <label class="settings-checkbox-label"><input id="settings-sound" type="checkbox"><span>播放告警提示音</span></label>
+          <button id="settings-test-alert" class="soft-button" type="button" style="margin-left:auto">测试通知与声音</button>
+        </div>
+      </section>
+      <section class="pricing-section">
+        <div class="pricing-section-title">监控采样</div>
+        <div class="pricing-section-note">后台同步与扫描受监控 AI 工具日志的采样频率。</div>
+        <div class="pricing-inline">
+          <div class="pricing-field" style="width:200px"><label for="settings-sample-interval">日志同步周期 (秒)</label><input id="settings-sample-interval" type="number" min="10" max="3600" step="30" value="300"></div>
+        </div>
+      </section>
+    </div>
+    <div class="pricing-footer"><div class="pricing-footer-note" id="settings-status-note">设置将保存至本地并在系统中实时生效。</div><div class="pricing-footer-actions"><button id="settings-cancel" class="soft-button" type="button">取消</button><button id="settings-save" class="primary-button" type="button">保存设置</button></div></div>
+  </section>
   <div id="loading" class="loading" role="status" aria-label="正在刷新"></div>
   <div id="toast" class="toast"></div>
 
@@ -689,7 +736,7 @@
       "use strict";
       const $ = (selector) => document.querySelector(selector);
       const $$ = (selector) => [...document.querySelectorAll(selector)];
-      const state = { period: "today", provider: "", model: "", view: "overview", metric: "total_with_cache", customStart: "", customEnd: "", search: "", sortKey: "", sortDirection: "desc", currentRows: [], data: null, sequence: 0, redrawAfter: 0, compact: false, pricingSettings: null, pricingDraftRows: [], source: "", rankPage: { provider: 0, model: 0 }, layout: "full", mini: false };
+      const state = { period: "today", provider: "", model: "", view: "overview", metric: "total_with_cache", customStart: "", customEnd: "", search: "", sortKey: "", sortDirection: "desc", currentRows: [], data: null, sequence: 0, redrawAfter: 0, compact: false, pricingSettings: null, pricingDraftRows: [], settingsDraftMode: "boot", source: "", rankPage: { provider: 0, model: 0 }, layout: "full", mini: false };
       const pricingRateFields = ["input", "output", "reasoning", "cache_read", "cache_write"];
       const metricKeys = { "总 Token":"total_with_cache", "请求次数":"requests", "输入 Token":"input_tokens", "输出 Token":"output_tokens", "推理 Token":"reasoning_tokens", "缓存命中":"cache_hit_tokens", "成本":"total_cost" };
       const tableConfig = {
@@ -756,6 +803,27 @@
         } catch (error) { toast(`读取价格设置失败：${error}`); }
       };
       const closePricingSettings = () => { $("#pricing-modal").hidden = true; $("#pricing-backdrop").hidden = true; };
+      const openAppSettings = async () => {
+        try {
+          const settings = await callApi("get_app_settings");
+          state.settingsDraftMode = settings.startup_mode || "boot";
+          $$(".settings-mode").forEach(btn => btn.classList.toggle("active", btn.dataset.startupMode === state.settingsDraftMode));
+          $("#settings-daily-alert").value = Number(settings.daily_alert_tokens || 10000000);
+          $("#settings-spike-alert").value = Number(settings.spike_alert_tokens || 10000000);
+          $("#settings-spike-window").value = Number(settings.spike_window_minutes || 30);
+          $("#settings-sample-interval").value = Number(settings.sample_interval_seconds || 300);
+          $("#settings-notifications").checked = Boolean(settings.notifications);
+          $("#settings-sound").checked = Boolean(settings.sound);
+          $("#settings-modal").hidden = false;
+          $("#settings-backdrop").hidden = false;
+        } catch (error) {
+          toast(`读取系统设置失败：${error}`);
+        }
+      };
+      const closeAppSettings = () => {
+        $("#settings-modal").hidden = true;
+        $("#settings-backdrop").hidden = true;
+      };
       const collectPricingSettings = () => {
         const defaultRates = {}; $$('[data-default-rate]').forEach(input => { if (input.value !== "") defaultRates[input.dataset.defaultRate] = Number(input.value); });
         const models = state.pricingDraftRows.filter(row => row.provider && row.model).map(row => ({provider:row.provider, model:row.model, variant:row.variant || "default", rates:Object.fromEntries(Object.entries(row.rates || {}).filter(([,value]) => value !== undefined && value !== ""))}));
@@ -1133,7 +1201,7 @@
         $("#active-filter-summary").addEventListener("click",()=>{$("#reset-button").click();});
         $("#detail-search").addEventListener("input",e=>{state.search=e.target.value;if(state.data)renderDetail(state.data);});
         $("#drawer-close").addEventListener("click",closeRequestDrawer); $("#drawer-backdrop").addEventListener("click",closeRequestDrawer);
-        document.addEventListener("keydown",e=>{if(e.key==="Escape"){if(!$("#pricing-modal").hidden)closePricingSettings();else closeRequestDrawer();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="f"){e.preventDefault();$("#provider-filter").focus();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="r"){e.preventDefault();$("#refresh-button").click();}});
+        document.addEventListener("keydown",e=>{if(e.key==="Escape"){if(!$("#settings-modal").hidden)closeAppSettings();else if(!$("#pricing-modal").hidden)closePricingSettings();else closeRequestDrawer();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="f"){e.preventDefault();$("#provider-filter").focus();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="r"){e.preventDefault();$("#refresh-button").click();}});
         $("#metric-filter").addEventListener("change",e=>{state.metric=metricKeys[e.target.value];scheduleChart();});
         $("#theme-button").addEventListener("click",async()=>{const next=document.documentElement.dataset.theme==="light"?"dark":"light";applyTheme(next);try{await callApi("set_theme",next);}catch(error){toast(`主题设置失败：${error}`);}});
         refreshButtons().forEach(button=>button.addEventListener("click",refreshNow));
@@ -1148,6 +1216,42 @@
         $("#add-custom-price").addEventListener("click",()=>{state.pricingDraftRows.push({provider:"",model:"",variant:"default",rates:{}});renderPricingRows();setPricingMode("custom");});
         $("#pricing-save").addEventListener("click",async()=>{try{const settings=collectPricingSettings();await callApi("save_pricing_settings",settings);closePricingSettings();await loadView();toast("价格设置已保存并重新计算");}catch(error){toast(`保存价格设置失败：${error}`);}});
         $("#pricing-reset").addEventListener("click",async()=>{try{await callApi("save_pricing_settings",{mode:"official",multiplier:1,display_currency:displayCurrency,usd_cny_rate:usdCnyRate,default_rates:{},models:[]});closePricingSettings();await loadView();toast("已恢复官方价格");}catch(error){toast(`恢复官方价格失败：${error}`);}});
+        $("#settings-quick-button").addEventListener("click",openAppSettings);
+        $("#settings-button").addEventListener("click",openAppSettings);
+        $("#settings-close").addEventListener("click",closeAppSettings);
+        $("#settings-cancel").addEventListener("click",closeAppSettings);
+        $("#settings-backdrop").addEventListener("click",closeAppSettings);
+        $$(".settings-mode").forEach(button => button.addEventListener("click", () => {
+          state.settingsDraftMode = button.dataset.startupMode;
+          $$(".settings-mode").forEach(b => b.classList.toggle("active", b === button));
+        }));
+        $("#settings-test-alert").addEventListener("click", async () => {
+          try {
+            await callApi("test_alert");
+            toast("测试通知和提示音已发送");
+          } catch(error) {
+            toast(`测试失败：${error}`);
+          }
+        });
+        $("#settings-save").addEventListener("click", async () => {
+          try {
+            const settings = {
+              startup_mode: state.settingsDraftMode || "boot",
+              daily_alert_tokens: Number($("#settings-daily-alert").value || 10000000),
+              spike_alert_tokens: Number($("#settings-spike-alert").value || 10000000),
+              spike_window_minutes: Number($("#settings-spike-window").value || 30),
+              sample_interval_seconds: Number($("#settings-sample-interval").value || 300),
+              notifications: $("#settings-notifications").checked,
+              sound: $("#settings-sound").checked,
+            };
+            await callApi("save_app_settings", settings);
+            closeAppSettings();
+            await loadView();
+            toast("系统设置已保存生效");
+          } catch(error) {
+            toast(`保存设置失败：${error}`);
+          }
+        });
         let resizeFrame=0; window.addEventListener("resize",()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(updateLayout);},{passive:true});
       }
       const AUTO_REFRESH_MS = 20000;
@@ -1224,9 +1328,16 @@
           reportUiError("初始化失败", error);
           return;
         }
+        const checkSettingsTrigger = async () => {
+          try {
+            const needOpen = await callApi("check_open_settings");
+            if (needOpen) openAppSettings();
+          } catch(e) {}
+        };
         setInterval(autoRefresh, AUTO_REFRESH_MS);
-        document.addEventListener("visibilitychange",()=>{ if(!document.hidden) autoRefresh(); });
-        window.addEventListener("focus",autoRefresh);
+        document.addEventListener("visibilitychange",()=>{ if(!document.hidden) { autoRefresh(); checkSettingsTrigger(); } });
+        window.addEventListener("focus",()=>{ autoRefresh(); checkSettingsTrigger(); });
+        checkSettingsTrigger();
       }
       window.addEventListener("pywebviewready",init,{once:true}); if(apiReady())init();
     })();

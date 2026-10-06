@@ -194,6 +194,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "notifications": True,
     "sound": True,
     "auto_start": True,
+    "startup_mode": "boot",
     "full_reconcile_hours": 24,
     "ui_theme": "dark",
     "use_model_dev_pricing": True,
@@ -2904,6 +2905,7 @@ class Monitor:
         week_start = int((datetime.now().astimezone() - timedelta(days=7)).timestamp() * 1000)
         month_start = int((datetime.now().astimezone() - timedelta(days=30)).timestamp() * 1000)
         spike_start = timestamp - max(1, safe_int(self.config["spike_window_minutes"])) * 60 * 1000
+        past_24h_start = timestamp - 24 * 60 * 60 * 1000
         return {
             "timestamp": timestamp,
             "any_running": any_source_running(),
@@ -2914,6 +2916,7 @@ class Monitor:
             "antigravity_running": antigravity_is_running(),
             "day": day,
             "today": self.store.summary(day_start, day_end),
+            "past_24h": self.store.summary(past_24h_start, timestamp + 1),
             "seven_days": self.store.summary(week_start, timestamp + 1),
             "thirty_days": self.store.summary(month_start, timestamp + 1),
             "spike_window": self.store.summary(spike_start, timestamp + 1),
@@ -3173,6 +3176,32 @@ def run_startup_command(command: str) -> None:
         winreg.SetValueEx(key, APP_ID, 0, winreg.REG_SZ, command)
 
 
+def get_system_startup_state() -> tuple[bool, str]:
+    """Check the Windows registry Run key for APP_ID.
+    Returns (is_enabled, mode) where mode is 'boot', 'companion', or 'none'.
+    """
+    if os.name != "nt":
+        return False, "none"
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+            value, _ = winreg.QueryValueEx(key, APP_ID)
+            val = str(value or "").strip()
+            if not val:
+                return False, "none"
+            if "--companion" in val:
+                return True, "companion"
+            return True, "boot"
+    except OSError:
+        return False, "none"
+
+
+def startup_enabled() -> bool:
+    enabled, _ = get_system_startup_state()
+    return enabled
+
+
 def remove_startup_command() -> None:
     if os.name != "nt":
         return
@@ -3185,23 +3214,56 @@ def remove_startup_command() -> None:
         pass
 
 
-def startup_enabled() -> bool:
-    if os.name != "nt":
-        return False
-    import winreg
-
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
-            value, _ = winreg.QueryValueEx(key, APP_ID)
-            return APP_ID in str(executable_path()).lower() or "opencode token monitor" in str(value).lower()
-    except OSError:
-        return False
-
-
-def install_startup(config_path: Path) -> None:
-    arguments = app_command("tray", "--config", str(config_path))
+def install_startup(config_path: Path, mode: str = "boot") -> None:
+    if mode == "companion":
+        arguments = app_command("tray", "--companion", "--config", str(config_path))
+    else:
+        arguments = app_command("tray", "--config", str(config_path))
     command = subprocess.list2cmdline(arguments)
     run_startup_command(command)
+
+
+def set_startup_mode(config_path: Path, mode: str) -> None:
+    """Apply startup mode to Windows Run registry and persist to config.json."""
+    mode = str(mode or "boot").strip().lower()
+    if mode not in {"boot", "companion", "none"}:
+        mode = "boot"
+
+    if mode == "none":
+        remove_startup_command()
+    else:
+        install_startup(config_path, mode=mode)
+
+    try:
+        cfg = load_config(config_path)
+        cfg["startup_mode"] = mode
+        cfg["auto_start"] = (mode != "none")
+        save_config(config_path, cfg)
+    except Exception:
+        pass
+
+
+SETTINGS_TRIGGER_FILE = ".open_settings"
+
+
+def request_dashboard_settings(data_dir: Path | None = None) -> None:
+    target_dir = data_dir or app_data_dir()
+    try:
+        (target_dir / SETTINGS_TRIGGER_FILE).write_text("1", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def check_and_clear_settings_request(data_dir: Path | None = None) -> bool:
+    target_dir = data_dir or app_data_dir()
+    flag = target_dir / SETTINGS_TRIGGER_FILE
+    if flag.exists():
+        try:
+            flag.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return True
+    return False
 
 
 def ensure_interactive_desktop() -> None:
@@ -3471,10 +3533,15 @@ def ensure_tray_running(config_path: Path) -> None:
         pass
 
 
-def open_dashboard(config_path: Path) -> None:
+def open_dashboard(config_path: Path, show_settings: bool = False) -> None:
+    if show_settings:
+        request_dashboard_settings()
     if show_existing_dashboard():
         return
-    command = app_command("dashboard", "--config", str(config_path))
+    args = ["dashboard", "--config", str(config_path)]
+    if show_settings:
+        args.append("--settings")
+    command = app_command(*args)
     subprocess.Popen(
         command,
         close_fds=True,
@@ -3482,7 +3549,7 @@ def open_dashboard(config_path: Path) -> None:
     )
 
 
-def run_tray(config_path: Path) -> int:
+def run_tray(config_path: Path, companion: bool = False) -> int:
     ensure_interactive_desktop()
     try:
         import pystray  # type: ignore
@@ -3505,6 +3572,7 @@ def run_tray(config_path: Path) -> int:
     sync_lock = threading.Lock()
     tray_state = {"idle": False}
     maximum = max(1, safe_int(config["color_max_tokens"]))
+    is_companion = companion or (config.get("startup_mode") == "companion")
 
     def read_status_in_current_thread() -> dict[str, Any]:
         # SQLite connections are intentionally thread-affine. The tray menu
@@ -3523,7 +3591,10 @@ def run_tray(config_path: Path) -> int:
         icon.icon = make_idle_icon()
         icon.title = status_text(status, maximum)
         tray_state["idle"] = True
-        icon.update_menu()
+        try:
+            icon.update_menu()
+        except Exception:
+            pass
 
     def sync_once(initial: bool = False) -> None:
         # This guard is intentionally repeated here (the worker also checks),
@@ -3554,7 +3625,10 @@ def run_tray(config_path: Path) -> int:
             icon.icon = make_icon(value, maximum, error)
             icon.title = status_text(status, maximum)
             tray_state["idle"] = False
-            icon.update_menu()
+            try:
+                icon.update_menu()
+            except Exception:
+                pass
         except Exception as exc:
             logger.exception("Tray synchronization worker failed")
             if notifier.icon is not None:
@@ -3575,11 +3649,22 @@ def run_tray(config_path: Path) -> int:
             codex_is_running(),
         )
         while not stop_event.is_set():
-            if not any_source_running():
+            running = any_source_running()
+            if not running:
                 set_idle_state()
                 next_sync_at = 0.0
                 stop_event.wait(PROCESS_POLL_SECONDS)
                 continue
+
+            if is_companion and not icon.visible:
+                icon.visible = True
+                logger.info("Monitored app detected in companion mode; activated tray icon")
+                if config.get("notifications", True):
+                    notifier.notify(
+                        APP_NAME,
+                        "检测到 AI 开发工具已启动，用量监控已自动激活。",
+                        sound=bool(config.get("sound", True)),
+                    )
 
             now = time.monotonic()
             if next_sync_at <= 0 or now >= next_sync_at:
@@ -3597,7 +3682,7 @@ def run_tray(config_path: Path) -> int:
     initially_running = any_source_running()
     initial_icon = make_icon(0, maximum) if initially_running else make_idle_icon()
     tray_state["idle"] = not initially_running
-    icon = pystray.Icon(APP_ID, initial_icon, APP_NAME, menu=pystray.Menu())
+    icon = pystray.Icon(APP_ID, initial_icon, APP_NAME)
     notifier.icon = icon
 
     def refresh(_icon: Any = None, _item: Any = None) -> None:
@@ -3629,63 +3714,97 @@ def run_tray(config_path: Path) -> int:
     def test_alert(_icon: Any = None, _item: Any = None) -> None:
         notifier.notify(f"{APP_NAME} 测试", "系统通知、声音和托盘颜色工作正常。", sound=True)
 
-    def toggle_startup(_icon: Any = None, _item: Any = None) -> None:
-        if startup_enabled():
-            remove_startup_command()
-        else:
-            install_startup(config_path)
-        icon.update_menu()
-
     def quit_app(_icon: Any = None, _item: Any = None) -> None:
         stop_event.set()
         if os.name == "nt":
             kill_orphan_dashboards(logger)
         icon.stop()
 
-    def menu() -> Any:
+    def generate_menu_items() -> Any:
         status = read_status_in_current_thread()
         today = status["today"]
+        past_24h = status.get("past_24h") or today
         spike = status["spike_window"]
         any_running = bool(status.get("any_running"))
         running_label = "Agent: 运行中 — 监控已激活" if any_running else "Agent: 未运行 — 空闲中"
-        startup = "开机自启：已启用" if startup_enabled() else "开机自启：未启用"
-        return pystray.Menu(
-            pystray.MenuItem(
-                running_label,
-                None,
-                enabled=False,
-            ),
-            pystray.MenuItem(
-                f"今日用量: {format_int(today['total_with_cache'])} Token (含缓存)",
-                None,
-                enabled=False,
-            ),
-            pystray.MenuItem(
-                f"今日排除缓存: {format_int(today['total_without_cache_read'])}",
-                None,
-                enabled=False,
-            ),
-            pystray.MenuItem(
-                f"最近 {config['spike_window_minutes']} 分钟: {format_int(spike['total_with_cache'])}",
-                None,
-                enabled=False,
-            ),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("打开仪表盘", lambda _i=None, _m=None: open_dashboard(config_path), default=True),
-            pystray.MenuItem("立即刷新", refresh, enabled=any_running),
-            pystray.MenuItem("打开数据目录", open_folder),
-            pystray.MenuItem("打开 CSV 目录", open_csv),
-            pystray.MenuItem("测试通知告警", test_alert),
-            pystray.MenuItem(startup, toggle_startup),
-            pystray.MenuItem("退出", quit_app),
-        )
 
-    icon.menu = menu()
+        _, current_mode = get_system_startup_state()
+
+        yield pystray.MenuItem(
+            running_label,
+            None,
+            enabled=False,
+        )
+        day_str = status.get("day") or "今日"
+        yield pystray.MenuItem(
+            f"今日用量 ({day_str}): {format_int(today['total_with_cache'])} Token (含缓存)",
+            None,
+            enabled=False,
+        )
+        yield pystray.MenuItem(
+            f"今日排除缓存: {format_int(today['total_without_cache_read'])}",
+            None,
+            enabled=False,
+        )
+        yield pystray.MenuItem(
+            f"最近 24 小时: {format_int(past_24h['total_with_cache'])} Token",
+            None,
+            enabled=False,
+        )
+        yield pystray.MenuItem(
+            f"最近 {config.get('spike_window_minutes', 30)} 分钟: {format_int(spike['total_with_cache'])} Token",
+            None,
+            enabled=False,
+        )
+        yield pystray.Menu.SEPARATOR
+        yield pystray.MenuItem("打开仪表盘", lambda _i=None, _m=None: open_dashboard(config_path), default=True)
+        yield pystray.MenuItem("系统设置...", lambda _i=None, _m=None: open_dashboard(config_path, show_settings=True))
+
+        def switch_mode(mode: str) -> None:
+            set_startup_mode(config_path, mode)
+            try:
+                icon.update_menu()
+            except Exception:
+                pass
+
+        yield pystray.MenuItem(
+            "自启动模式",
+            pystray.Menu(
+                pystray.MenuItem(
+                    "开机自动启动",
+                    lambda _i=None, _m=None: switch_mode("boot"),
+                    checked=lambda _it: current_mode == "boot",
+                    radio=True,
+                ),
+                pystray.MenuItem(
+                    "伴随 AI 工具启动",
+                    lambda _i=None, _m=None: switch_mode("companion"),
+                    checked=lambda _it: current_mode == "companion",
+                    radio=True,
+                ),
+                pystray.MenuItem(
+                    "不自动启动",
+                    lambda _i=None, _m=None: switch_mode("none"),
+                    checked=lambda _it: current_mode == "none",
+                    radio=True,
+                ),
+            ),
+        )
+        yield pystray.MenuItem("立即刷新", refresh, enabled=any_running)
+        yield pystray.MenuItem("打开数据目录", open_folder)
+        yield pystray.MenuItem("打开 CSV 目录", open_csv)
+        yield pystray.MenuItem("测试通知告警", test_alert)
+        yield pystray.MenuItem("退出", quit_app)
+
+    icon.menu = pystray.Menu(generate_menu_items)
     threading.Thread(target=worker, daemon=True).start()
 
     def _on_setup(i: Any) -> None:
         ensure_interactive_desktop()
-        i.visible = True
+        if is_companion and not initially_running:
+            i.visible = False
+        else:
+            i.visible = True
 
     try:
         icon.run(setup=_on_setup)
@@ -4493,6 +4612,62 @@ class DashboardApi:
         DASHBOARD_WINDOW.resize(width, height)
         return {"ok": True}
 
+    def get_app_settings(self) -> dict[str, Any]:
+        config = load_config(Path(self._config_path))
+        is_startup, startup_mode = get_system_startup_state()
+        if not is_startup:
+            startup_mode = "none"
+        elif not startup_mode:
+            startup_mode = config.get("startup_mode", "boot")
+
+        return {
+            "startup_mode": startup_mode,
+            "daily_alert_tokens": safe_int(config.get("daily_alert_tokens", 10_000_000)),
+            "spike_alert_tokens": safe_int(config.get("spike_alert_tokens", 10_000_000)),
+            "spike_window_minutes": safe_int(config.get("spike_window_minutes", 30)),
+            "sample_interval_seconds": safe_int(config.get("sample_interval_seconds", 300)),
+            "notifications": bool(config.get("notifications", True)),
+            "sound": bool(config.get("sound", True)),
+            "ui_theme": config.get("ui_theme", "dark"),
+            "display_currency": config.get("display_currency", "USD"),
+            "usd_cny_rate": float(config.get("usd_cny_rate", 7.20)),
+        }
+
+    def save_app_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        config_path = Path(self._config_path)
+        config = load_config(config_path)
+
+        mode = str(settings.get("startup_mode", "boot")).strip().lower()
+        if mode not in {"boot", "companion", "none"}:
+            mode = "boot"
+
+        set_startup_mode(config_path, mode)
+
+        if "daily_alert_tokens" in settings:
+            config["daily_alert_tokens"] = max(1_000, safe_int(settings["daily_alert_tokens"]))
+        if "spike_alert_tokens" in settings:
+            config["spike_alert_tokens"] = max(1_000, safe_int(settings["spike_alert_tokens"]))
+        if "spike_window_minutes" in settings:
+            config["spike_window_minutes"] = max(1, min(1440, safe_int(settings["spike_window_minutes"])))
+        if "sample_interval_seconds" in settings:
+            config["sample_interval_seconds"] = max(10, min(3600, safe_int(settings["sample_interval_seconds"])))
+        if "notifications" in settings:
+            config["notifications"] = bool(settings["notifications"])
+        if "sound" in settings:
+            config["sound"] = bool(settings["sound"])
+
+        save_config(config_path, config)
+        return {"ok": True, "settings": self.get_app_settings()}
+
+    def test_alert(self) -> dict[str, bool]:
+        config = load_config(Path(self._config_path))
+        notifier = Notifier(config)
+        notifier.notify(f"{APP_NAME} 测试", "系统通知、声音和托盘颜色工作正常。", sound=True)
+        return {"ok": True}
+
+    def check_open_settings(self) -> bool:
+        return check_and_clear_settings_request()
+
 
 def _fit_window_to_screen(width: int, height: int) -> tuple[int, int]:
     """Clamp the default window size to the available screen work area.
@@ -4530,8 +4705,10 @@ def _report_startup_failure(message: str) -> None:
     print(f"{APP_NAME}: {message}", file=sys.stderr)
 
 
-def run_dashboard(config_path: Path) -> int:
+def run_dashboard(config_path: Path, show_settings: bool = False) -> int:
     ensure_interactive_desktop()
+    if show_settings:
+        request_dashboard_settings()
     logger = setup_logging(app_data_dir())
     # Windows left over by an older build are never matched by the exact-title
     # lookup below, so remove them first.
@@ -4667,8 +4844,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="OpenCodeTokenMonitor", description="Record and monitor local OpenCode token usage")
     parser.add_argument("--config", type=Path, default=app_data_dir() / "config.json")
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("tray", help="run the Windows tray monitor")
-    sub.add_parser("dashboard", help="open the native Windows dashboard")
+    tray_cmd = sub.add_parser("tray", help="run the Windows tray monitor")
+    tray_cmd.add_argument("--companion", action="store_true", help="run in companion mode (activate when AI tools run)")
+    dash_cmd = sub.add_parser("dashboard", help="open the native Windows dashboard")
+    dash_cmd.add_argument("--settings", action="store_true", help="open settings modal on startup")
     sync = sub.add_parser("sync", help="scan OpenCode once")
     sync.add_argument("--json", action="store_true")
     status = sub.add_parser("status", help="show current token totals")
@@ -4677,7 +4856,8 @@ def build_parser() -> argparse.ArgumentParser:
     history.add_argument("--days", type=int, default=30)
     export = sub.add_parser("export", help="rebuild all CSV exports")
     export.add_argument("--path", type=Path, help="copy the CSV directory to this path")
-    sub.add_parser("install", help="enable Windows auto-start")
+    install_cmd = sub.add_parser("install", help="enable Windows auto-start")
+    install_cmd.add_argument("--mode", choices=["boot", "companion"], default="boot", help="startup mode")
     sub.add_parser("uninstall", help="disable Windows auto-start")
     sub.add_parser("test-alert", help="show a test notification and play a sound")
     sub.add_parser("paths", help="print config, data, database, and CSV paths")
@@ -4695,9 +4875,9 @@ def main(argv: list[str] | None = None) -> int:
     # database, otherwise the first start after the rename would look empty.
     migrate_legacy_data()
     if command == "dashboard":
-        return run_dashboard(args.config)
+        return run_dashboard(args.config, show_settings=getattr(args, "settings", False))
     if command == "tray":
-        return run_tray(args.config)
+        return run_tray(args.config, companion=getattr(args, "companion", False))
     if command is None:
         return run_dashboard(args.config)
 
@@ -4705,11 +4885,12 @@ def main(argv: list[str] | None = None) -> int:
     data_dir = app_data_dir()
     logger = setup_logging(data_dir)
     if command == "install":
-        install_startup(args.config)
-        print(f"Auto-start enabled: {APP_ID}")
+        mode = getattr(args, "mode", "boot")
+        set_startup_mode(args.config, mode)
+        print(f"Auto-start enabled ({mode}): {APP_ID}")
         return 0
     if command == "uninstall":
-        remove_startup_command()
+        set_startup_mode(args.config, "none")
         print("Auto-start disabled")
         return 0
     if command == "paths":

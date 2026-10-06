@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -2167,6 +2168,69 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(module._decode_proto(b'\x12\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01testing'), [])
         # test truncated length delimited
         self.assertEqual(module._decode_proto(b'\x12\x08testing'), [])
+
+    def test_startup_state_and_settings_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_path = Path(tmp_dir)
+            self.assertFalse(module.check_and_clear_settings_request(temp_path))
+            module.request_dashboard_settings(temp_path)
+            self.assertTrue(module.check_and_clear_settings_request(temp_path))
+            self.assertFalse(module.check_and_clear_settings_request(temp_path))
+
+    def test_dashboard_api_app_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.json"
+            module.save_config(config_path, module.DEFAULT_CONFIG.copy())
+            api = module.DashboardApi(config_path)
+
+            original_run_cmd = module.run_startup_command
+            original_remove_cmd = module.remove_startup_command
+            recorded_run: list[str] = []
+            recorded_del: list[bool] = []
+            module.run_startup_command = lambda cmd: recorded_run.append(cmd)
+            module.remove_startup_command = lambda: recorded_del.append(True)
+
+            try:
+                # Test save_app_settings for companion mode
+                res = api.save_app_settings({
+                    "startup_mode": "companion",
+                    "daily_alert_tokens": 5_000_000,
+                    "spike_alert_tokens": 2_000_000,
+                    "spike_window_minutes": 15,
+                    "sample_interval_seconds": 60,
+                    "notifications": False,
+                    "sound": False,
+                })
+                self.assertTrue(res["ok"])
+                self.assertEqual(res["settings"]["daily_alert_tokens"], 5_000_000)
+                self.assertEqual(res["settings"]["spike_alert_tokens"], 2_000_000)
+                self.assertEqual(res["settings"]["spike_window_minutes"], 15)
+                self.assertEqual(res["settings"]["sample_interval_seconds"], 60)
+                self.assertFalse(res["settings"]["notifications"])
+                self.assertFalse(res["settings"]["sound"])
+                self.assertTrue(any("--companion" in c for c in recorded_run))
+
+                # Test save_app_settings for none mode
+                res = api.save_app_settings({"startup_mode": "none"})
+                self.assertTrue(res["ok"])
+                self.assertTrue(len(recorded_del) > 0)
+            finally:
+                module.run_startup_command = original_run_cmd
+                module.remove_startup_command = original_remove_cmd
+
+    def test_current_status_includes_past_24h(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir)
+            logger = logging.getLogger("test_status")
+            config = module.DEFAULT_CONFIG.copy()
+            monitor = module.Monitor(config, data_dir, logger)
+            try:
+                status = monitor.current_status()
+                self.assertIn("past_24h", status)
+                self.assertIn("total_with_cache", status["past_24h"])
+                self.assertIn("total_without_cache_read", status["past_24h"])
+            finally:
+                monitor.close()
 
 if __name__ == "__main__":
     unittest.main()
