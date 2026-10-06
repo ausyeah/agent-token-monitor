@@ -17,7 +17,10 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
-import winsound
+try:
+    import winsound
+except ImportError:
+    winsound = None
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
@@ -797,43 +800,53 @@ def _decode_proto(data: bytes) -> list[tuple[int, int, Any]]:
     while pos < length:
         key = 0
         shift = 0
+        key_done = False
         while pos < length:
             b = data[pos]
             pos += 1
             key |= (b & 0x7F) << shift
             if not (b & 0x80):
+                key_done = True
                 break
             shift += 7
             if shift >= 70:
                 break
+        if not key_done:
+            break
         field_num = key >> 3
         wire_type = key & 7
         if wire_type == 0:  # varint
             val = 0
             shift = 0
+            val_done = False
             while pos < length:
                 b = data[pos]
                 pos += 1
                 val |= (b & 0x7F) << shift
                 if not (b & 0x80):
+                    val_done = True
                     break
                 shift += 7
                 if shift >= 70:
                     break
+            if not val_done:
+                break
             res.append((field_num, wire_type, val))
         elif wire_type == 2:  # length-delimited
             sub_len = 0
             shift = 0
+            len_done = False
             while pos < length:
                 b = data[pos]
                 pos += 1
                 sub_len |= (b & 0x7F) << shift
                 if not (b & 0x80):
+                    len_done = True
                     break
                 shift += 7
                 if shift >= 70:
                     break
-            if pos + sub_len > length:
+            if not len_done or sub_len < 0 or pos + sub_len > length:
                 break
             val_bytes = data[pos : pos + sub_len]
             pos += sub_len
@@ -851,8 +864,6 @@ def _decode_proto(data: bytes) -> list[tuple[int, int, Any]]:
         else:
             break
     return res
-
-
 def _parse_antigravity_step_timestamp(metadata: bytes) -> int:
     """Extract millisecond epoch timestamp from Antigravity steps.metadata."""
     for fn, wt, val in _decode_proto(metadata):
@@ -972,7 +983,7 @@ class Store:
         self.db_path = data_dir / "monitor.db"
         self.csv_dir = data_dir / "csv"
         self.csv_dir.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path, timeout=15)
+        self.conn = sqlite3.connect(self.db_path, timeout=15, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
@@ -1737,7 +1748,7 @@ class Monitor:
         project_path = str(row["worktree"] or row["directory"] or "")
         project_name = str(row["project_name"] or "")
         if not project_name:
-            project_name = Path(project_path).name if project_path else project_id
+            project_name = project_path.replace("\\", "/").rstrip("/").split("/")[-1] if project_path else project_id
         return {
             "session_id": str(row["session_id"] or ""),
             "project_id": project_id,
@@ -2012,7 +2023,7 @@ class Monitor:
 
         provider, model, variant = self._dsh_route(event, context)
         cwd = str(context.get("cwd") or "")
-        project_name = Path(cwd).name if cwd else "deepseek-harness"
+        project_name = cwd.replace("\\", "/").rstrip("/").split("/")[-1] if cwd else "deepseek-harness"
         return UsageRecord(
             message_id=dedupe_id,
             source=DSH_SOURCE,
@@ -2334,7 +2345,7 @@ class Monitor:
             source_rank=CODEX_SOURCE_RANK,
             session_id=session_id,
             project_id=cwd or session_id,
-            project_name=Path(cwd).name if cwd else "codex",
+            project_name=cwd.replace("\\", "/").rstrip("/").split("/")[-1] if cwd else "codex",
             project_path=cwd,
             provider_id=self._codex_provider(context.get("model_provider", ""), model),
             model_id=model,
@@ -2516,7 +2527,7 @@ class Monitor:
         variant = "custom" if is_custom else "default"
         project_path = str(obj.get("cwd") or "")
         project_id = str(obj.get("sessionId") or "")
-        project_name = Path(project_path).name if project_path else "workbuddy"
+        project_name = project_path.replace("\\", "/").rstrip("/").split("/")[-1] if project_path else "workbuddy"
         # A stable per-request key. WorkBuddy reuses messageId across the
         # streaming items of one assistant turn, so the record id is used and
         # the session id is mixed in to keep it globally unique.
@@ -2701,7 +2712,7 @@ class Monitor:
 
                 summary = summaries.get(session_id) or {}
                 project_path = summary.get("project_path", "")
-                project_name = Path(project_path).name if project_path else (summary.get("title") or "antigravity")
+                project_name = project_path.replace("\\", "/").rstrip("/").split("/")[-1] if project_path else (summary.get("title") or "antigravity")
                 project_id = summary.get("project_id") or session_id
                 agent = summary.get("agent_name") or "antigravity"
 
@@ -3140,7 +3151,7 @@ class Notifier:
                     self.icon.notify(message, title)
                 except Exception:
                     pass
-        if sound and self.config.get("sound", True):
+        if sound and self.config.get("sound", True) and winsound:
             try:
                 winsound.PlaySound(
                     "SystemExclamation",

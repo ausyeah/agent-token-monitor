@@ -2120,5 +2120,53 @@ class MonitorTests(unittest.TestCase):
                 monitor.close()
 
 
+
+
+    def test_sqlite_wal_concurrency(self) -> None:
+        import threading
+        import time
+        with tempfile.TemporaryDirectory() as temp:
+            store = module.Store(Path(temp))
+            t = 1_700_000_000_000
+
+            def writer():
+                for i in range(50):
+                    store.upsert_event(module.UsageRecord(
+                        message_id=f"c-{i}", source="v2", source_rank=2, session_id="s",
+                        project_id="p", project_name="p", project_path="p",
+                        provider_id="alpha", model_id="m1", variant="high", agent="",
+                        event_time=t, source_created=t, source_updated=t,
+                        input_tokens=100, output_tokens=0, reasoning_tokens=0,
+                        cache_read_tokens=0, cache_write_tokens=0, cost=2.0,
+                    ))
+                    store.conn.commit()
+                    time.sleep(0.01)
+
+            def reader():
+                for _ in range(50):
+                    store_read = module.Store(Path(temp))
+                    store_read.analytics(t-1000, t+1000)
+                    store_read.close()
+                    time.sleep(0.01)
+
+            t1 = threading.Thread(target=writer)
+            t2 = threading.Thread(target=reader)
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+
+            self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM usage_events").fetchone()[0], 50)
+            store.close()
+
+
+    def test_decode_proto_malformed_payloads(self) -> None:
+        # test truncated varint
+        self.assertEqual(module._decode_proto(b'\x08\x96'), [])
+        # test malicious length
+        self.assertEqual(module._decode_proto(b'\x12\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01testing'), [])
+        # test truncated length delimited
+        self.assertEqual(module._decode_proto(b'\x12\x08testing'), [])
+
 if __name__ == "__main__":
     unittest.main()
