@@ -4541,11 +4541,65 @@ def run_dashboard(config_path: Path) -> int:
             )
             return 0
 
-    def _delayed_tray() -> None:
-        time.sleep(2.0)
-        ensure_tray_running(config_path)
+    tray_icon: Any = None
+    if os.name == "nt" and not tray_instance_exists():
+        try:
+            import pystray  # type: ignore
+            config = load_config(config_path)
+            maximum = max(1, safe_int(config.get("color_max_tokens", 100_000_000)))
+            initial_icon = make_icon(0, maximum) if any_source_running() else make_idle_icon()
 
-    threading.Thread(target=_delayed_tray, daemon=True, name="DelayedTray").start()
+            def _open_dash(_i: Any = None, _item: Any = None) -> None:
+                show_existing_dashboard()
+
+            def _quit_all(_i: Any = None, _item: Any = None) -> None:
+                if tray_icon:
+                    try:
+                        tray_icon.stop()
+                    except Exception:
+                        pass
+                if DASHBOARD_WINDOW:
+                    try:
+                        DASHBOARD_WINDOW.destroy()
+                    except Exception:
+                        pass
+                os._exit(0)
+
+            tray_icon = pystray.Icon(
+                APP_ID,
+                initial_icon,
+                APP_NAME,
+                menu=pystray.Menu(
+                    pystray.MenuItem("打开仪表盘", _open_dash, default=True),
+                    pystray.MenuItem("退出", _quit_all),
+                ),
+            )
+            threading.Thread(target=tray_icon.run, daemon=True, name="DashboardTray").start()
+
+            def _tray_updater() -> None:
+                while tray_icon:
+                    try:
+                        cfg = load_config(config_path)
+                        max_tokens = max(1, safe_int(cfg.get("color_max_tokens", 100_000_000)))
+                        st_monitor = Monitor(cfg, app_data_dir(), logger)
+                        try:
+                            st = st_monitor.current_status()
+                        finally:
+                            st_monitor.close()
+                        if any_source_running():
+                            val = safe_int(st["today"]["total_with_cache"])
+                            err = bool(st["last_error"])
+                            tray_icon.icon = make_icon(val, max_tokens, err)
+                        else:
+                            tray_icon.icon = make_idle_icon()
+                        tray_icon.title = status_text(st, max_tokens)
+                    except Exception:
+                        pass
+                    time.sleep(5.0)
+
+            threading.Thread(target=_tray_updater, daemon=True, name="TrayUpdater").start()
+        except Exception as exc:
+            logger.debug("In-process tray icon setup skipped: %s", exc)
 
     # Disable Chromium GPU hardware acceleration to avoid black-screen / blank window bugs on Windows
     args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
@@ -4599,9 +4653,11 @@ def run_dashboard(config_path: Path) -> int:
         _report_startup_failure(f"仪表盘启动异常: {exc}")
         return 1
     finally:
-        # The lock is process-wide, so release it even on a crash path. Leaving
-        # it held is harmless once the process exits, but an explicit release
-        # keeps shutdown ordering obvious and testable.
+        if tray_icon:
+            try:
+                tray_icon.stop()
+            except Exception:
+                pass
         release_named_mutex(guard)
     return 0
 
