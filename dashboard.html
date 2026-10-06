@@ -184,6 +184,7 @@
     .cache-row { display: grid; grid-template-columns: auto minmax(80px, 1fr) auto minmax(0, auto); align-items: center; gap: 14px; margin-top: 18px; }
     .cache-label, .cache-value { color: var(--muted); font-size: 12px; }
     .cache-value { color: var(--success); font-weight: 700; white-space: nowrap; }
+    #hit-rate { display: none; } /* Redundant with hero hit-rate card and avoids collision with share percentage */
     /* Share readout beside the composition bar: which part of the bar is what.
        It is allowed to wrap and shrink so the bar itself is never squeezed out. */
     .token-share { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px 9px; color: var(--muted); font-size: 11px; min-width: 0; }
@@ -195,13 +196,15 @@
     .token-share .share-item i.reasoning { background: #b18be8; }
     .token-share .share-item i.cache_hit { background: #e1aa68; }
     .token-share .share-item b { color: var(--text-soft); font-weight: 700; font-variant-numeric: tabular-nums; }
-    .cache-stack { display: flex; width: 100%; height: 12px; overflow: hidden; border: 1px solid var(--border); border-radius: 99px; background: var(--surface-3); }
-    .cache-segment { display: block; height: 100%; min-width: 0; transition: width .45s var(--ease); }
+    .cache-stack { display: flex; width: 100%; height: 14px; overflow: hidden; border: 1px solid var(--border); border-radius: 99px; background: var(--surface-3); }
+    .cache-segment { display: block; height: 100%; min-width: 0; transition: width .45s var(--ease); box-sizing: border-box; }
+    .cache-segment + .cache-segment { border-left: 1px solid color-mix(in srgb, var(--surface) 40%, transparent); }
     .cache-segment.input { background: #6f9cf4; }
     .cache-segment.output { background: #73c69a; }
     .cache-segment.reasoning { background: #b18be8; }
     .cache-segment.cache_hit { background: #e1aa68; }
-    .cache-legend { display: flex; flex-wrap: wrap; gap: 8px 15px; margin: 9px 0 0 74px; color: var(--muted); font-size: 10px; }
+    .cache-segment:hover { filter: brightness(1.15); }
+    .cache-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 10px 0 0 74px; color: var(--muted); font-size: 11px; }
     .cache-legend span { display: inline-flex; align-items: center; gap: 5px; }
     .cache-legend i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
     .cache-legend .input { background: #6f9cf4; }
@@ -906,8 +909,10 @@
         const total = Number(summary.total_with_cache || parts.reduce((sum, part) => sum + partValue(part), 0)) || 1;
         stack.innerHTML = parts.map((part) => {
           const [key, label] = part; const value = partValue(part);
-          const width = Math.max(0, Math.min(100, value / total * 100));
-          return `<span class="cache-segment ${key}" style="width:${width}%" title="${label}：${compactFmt(value)}（${width.toFixed(1)}%）"></span>`;
+          if (value <= 0) return "";
+          const pct = Math.max(0, Math.min(100, value / total * 100));
+          const pctText = pct < 0.05 && pct > 0 ? "<0.1%" : `${pct.toFixed(1)}%`;
+          return `<span class="cache-segment ${key}" style="width:${pct}%;min-width:4px" title="${label}：${compactFmt(value)}（${pctText}）"></span>`;
         }).join("");
         stack.setAttribute("aria-label", parts.map(part => `${part[1]} ${compactFmt(partValue(part))}`).join("，"));
       }
@@ -927,7 +932,15 @@
         renderTokenStack("#cache-stack", s, tokenParts);
         renderTokenStack("#compact-cache-stack", s, tokenParts);
         renderTokenShare(tokenParts, s);
-        $$('[data-cache-value]').forEach(node=>{const part=tokenParts.find(item=>item[0]===node.dataset.cacheValue);node.textContent=compactFmt(part?(typeof part[2]==="function"?part[2](s):s[part[2]]||0):0);});
+        $$('[data-cache-value]').forEach(node=>{
+          const part=tokenParts.find(item=>item[0]===node.dataset.cacheValue);
+          if (!part) { node.textContent = "0"; return; }
+          const val = typeof part[2]==="function"?part[2](s):s[part[2]]||0;
+          const totalVal = Number(s.total_with_cache || 0);
+          const pct = totalVal > 0 ? (val / totalVal * 100) : 0;
+          const pctText = pct < 0.05 && pct > 0 ? "<0.1%" : `${pct.toFixed(1)}%`;
+          node.innerHTML = `${compactFmt(val)} <span style="font-weight:400;opacity:0.8;font-size:10px">(${pctText})</span>`;
+        });
         const metrics = [["输入 Token","input_tokens"],["输出 Token","output_tokens"],["推理 Token","reasoning_tokens"],["缓存命中",cacheHitTokens],["不含缓存","total_without_cache_read"]];
         $("#metric-grid").innerHTML = metrics.map(([label,get]) => `<div class="metric"><div class="metric-label"><span class="metric-mark"></span>${label}</div><div class="metric-value">${compactFmt(typeof get==="function"?get(s):s[get])}</div></div>`).join("");
         const unit = data.granularity === "hour" ? "按小时" : "按天"; const caption = `${({today:"今日","24h":"最近24小时","7d":"7天","30d":"30天","90d":"90天",all:"全部",custom:"自定义"})[state.period]} · ${unit}`;
@@ -962,7 +975,29 @@
       // visible page, so a bar never looks full just because the biggest entry
       // happens to be on another page.
       const RANK_PAGE_SIZE = 5;
-      function renderRanking(selector, rows) { const rank = selector === "#provider-ranking" ? "provider" : "model"; const pages = Math.max(1, Math.ceil(rows.length / RANK_PAGE_SIZE)); const page = Math.max(0, Math.min(Number(state.rankPage?.[rank] ?? 0) || 0, pages - 1)); if (state.rankPage) state.rankPage[rank] = page; const top = rows.slice(page * RANK_PAGE_SIZE, (page + 1) * RANK_PAGE_SIZE); const max = Math.max(1, ...rows.map(r => Number(r.total_with_cache || 0))); $(selector).innerHTML = top.length ? top.map(r => `<div class="rank-item"><div class="rank-name" title="${esc(r.name)}">${esc(r.name)}</div><div class="rank-track"><div class="rank-fill" style="width:${Number(r.total_with_cache || 0) / max * 100}%"></div></div><div class="rank-value">${compactFmt(r.total_with_cache)}</div></div>`).join("") : `<div class="section-subtitle">暂无数据</div>`; const arrows = $$(`[data-rank="${rank}"] [data-rank-step]`); const label = $(`[data-rank-page="${rank}"]`); const many = pages > 1; arrows.forEach(button => { button.disabled = !many || (Number(button.dataset.rankStep) < 0 ? page === 0 : page === pages - 1); }); if (label) { label.textContent = `${page + 1}/${pages}`; label.hidden = !many; } }
+      function renderRanking(selector, rows) {
+        const rank = selector === "#provider-ranking" ? "provider" : "model";
+        const pages = Math.max(1, Math.ceil(rows.length / RANK_PAGE_SIZE));
+        const page = Math.max(0, Math.min(Number(state.rankPage?.[rank] ?? 0) || 0, pages - 1));
+        if (state.rankPage) state.rankPage[rank] = page;
+        const top = rows.slice(page * RANK_PAGE_SIZE, (page + 1) * RANK_PAGE_SIZE);
+        const max = Math.max(1, ...rows.map(r => Number(r.total_with_cache || 0)));
+        $(selector).innerHTML = top.length ? top.map(r => {
+          const val = Number(r.total_with_cache || 0);
+          const width = Math.max(0, Math.min(100, val / max * 100));
+          const share = r.share != null ? ` (${Number(r.share).toFixed(1)}%)` : "";
+          return `<div class="rank-item" title="${esc(r.name)}：${compactFmt(val)}${share}">` +
+            `<div class="rank-name">${esc(r.name)}</div>` +
+            `<div class="rank-track"><div class="rank-fill" style="width:${width}%;min-width:${val > 0 ? "4px" : "0"}"></div></div>` +
+            `<div class="rank-value">${compactFmt(val)}${share ? `<span style="font-size:10px;opacity:0.75;margin-left:3px">${share}</span>` : ""}</div>` +
+            `</div>`;
+        }).join("") : `<div class="section-subtitle">暂无数据</div>`;
+        const arrows = $$(`[data-rank="${rank}"] [data-rank-step]`);
+        const label = $(`[data-rank-page="${rank}"]`);
+        const many = pages > 1;
+        arrows.forEach(button => { button.disabled = !many || (Number(button.dataset.rankStep) < 0 ? page === 0 : page === pages - 1); });
+        if (label) { label.textContent = `${page + 1}/${pages}`; label.hidden = !many; }
+      }
       function renderDetail(data) {
         const cfg = tableConfig[state.view];
         let rows = [...(data[cfg.rows] || [])];
