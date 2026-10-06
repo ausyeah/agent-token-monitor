@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -91,45 +92,47 @@ class MonitorTests(unittest.TestCase):
             config["workbuddy_enabled"] = False
             config["dsh_enabled"] = False
             config["codex_enabled"] = False
+            config["antigravity_enabled"] = False
             logger = module.logging.getLogger("test-monitor")
             monitor = module.Monitor(config, data, logger)
-            first = monitor.sync()
-            self.assertEqual(first.records_seen, 2)
-            self.assertEqual(monitor.store.conn.execute("SELECT COUNT(*) FROM usage_events").fetchone()[0], 2)
-            summary = monitor.store.summary(0, t + 1000)
-            self.assertEqual(summary["total_with_cache"], 128)
-            self.assertEqual(summary["total_without_cache_read"], 24)
-            day, day_start, day_end = module.local_day_bounds(t)
-            analytics = monitor.store.analytics(day_start, day_end, granularity="hour")
-            self.assertEqual(analytics["summary"]["requests"], 2)
-            self.assertEqual(sum(row["total_with_cache"] for row in analytics["trend"]), 128)
-            self.assertEqual(len(analytics["trend"]), 24)
-            provider_filtered = monitor.store.analytics(day_start, day_end, provider_id="anthropic")
-            self.assertEqual(provider_filtered["summary"]["total_with_cache"], 10)
-            self.assertEqual(provider_filtered["providers"][0]["name"], "anthropic")
-            self.assertTrue(any(item["label"].startswith("opencode/space-bunny-free") for item in monitor.store.filter_options()["models"]))
+            try:
+                first = monitor.sync()
+                self.assertEqual(first.records_seen, 2)
+                self.assertEqual(monitor.store.conn.execute("SELECT COUNT(*) FROM usage_events").fetchone()[0], 2)
+                summary = monitor.store.summary(0, t + 1000)
+                self.assertEqual(summary["total_with_cache"], 128)
+                self.assertEqual(summary["total_without_cache_read"], 24)
+                day, day_start, day_end = module.local_day_bounds(t)
+                analytics = monitor.store.analytics(day_start, day_end, granularity="hour")
+                self.assertEqual(analytics["summary"]["requests"], 2)
+                self.assertEqual(sum(row["total_with_cache"] for row in analytics["trend"]), 128)
+                self.assertEqual(len(analytics["trend"]), 24)
+                provider_filtered = monitor.store.analytics(day_start, day_end, provider_id="anthropic")
+                self.assertEqual(provider_filtered["summary"]["total_with_cache"], 10)
+                self.assertEqual(provider_filtered["providers"][0]["name"], "anthropic")
+                self.assertTrue(any(item["label"].startswith("opencode/space-bunny-free") for item in monitor.store.filter_options()["models"]))
 
-
-            # Update the V2 source row and a V1 row on the next scan.
-            overlap = dict(v1)
-            overlap["data"] = dict(v1["data"])
-            overlap["data"]["tokens"] = {"input": 999, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
-            v2["updated"] += 100
-            v2["data"] = dict(v2["data"])
-            v2["data"]["tokens"] = {"input": 15, "output": 5, "reasoning": 2, "cache": {"read": 120, "write": 1}}
-            # Recreate the source database with both updated rows.
-            self.make_source_db(source, [v2], [overlap])
-            monitor.store.conn.execute("UPDATE meta SET value='0' WHERE key='watermark_v2'")
-            monitor.store.conn.execute("UPDATE meta SET value='0' WHERE key='watermark_v1'")
-            monitor.store.conn.commit()
-            second = monitor.sync()
-            self.assertEqual(second.records_changed, 2)
-            row = monitor.store.existing_event("m2")
-            self.assertEqual(row["input_tokens"], 15)
-            self.assertTrue((data / "csv" / "usage_ledger.csv").exists())
-            monitor.export_full_csv()
-            self.assertTrue((data / "csv" / "usage_events.csv").exists())
-            monitor.close()
+                # Update the V2 source row and a V1 row on the next scan.
+                overlap = dict(v1)
+                overlap["data"] = dict(v1["data"])
+                overlap["data"]["tokens"] = {"input": 999, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+                v2["updated"] += 100
+                v2["data"] = dict(v2["data"])
+                v2["data"]["tokens"] = {"input": 15, "output": 5, "reasoning": 2, "cache": {"read": 120, "write": 1}}
+                # Recreate the source database with both updated rows.
+                self.make_source_db(source, [v2], [overlap])
+                monitor.store.conn.execute("UPDATE meta SET value='0' WHERE key='watermark_v2'")
+                monitor.store.conn.execute("UPDATE meta SET value='0' WHERE key='watermark_v1'")
+                monitor.store.conn.commit()
+                second = monitor.sync()
+                self.assertEqual(second.records_changed, 2)
+                row = monitor.store.existing_event("m2")
+                self.assertEqual(row["input_tokens"], 15)
+                self.assertTrue((data / "csv" / "usage_ledger.csv").exists())
+                monitor.export_full_csv()
+                self.assertTrue((data / "csv" / "usage_events.csv").exists())
+            finally:
+                monitor.close()
 
     def test_model_dev_cost_estimation(self) -> None:
         catalog = {
@@ -293,6 +296,7 @@ class MonitorTests(unittest.TestCase):
             config["workbuddy_root"] = str(wb_root)
             config["dsh_enabled"] = False
             config["codex_enabled"] = False
+            config["antigravity_enabled"] = False
             config["opencode_db"] = str(empty_source)
             monitor = module.Monitor(config, data, module.logging.getLogger("test-workbuddy"))
             try:
@@ -401,6 +405,7 @@ class MonitorTests(unittest.TestCase):
             config["dsh_enabled"] = True
             config["dsh_root"] = str(dsh_root)
             config["codex_enabled"] = False
+            config["antigravity_enabled"] = False
             monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-dsh"))
             try:
                 self.assertEqual(monitor.sync().records_seen, 2)
@@ -455,6 +460,7 @@ class MonitorTests(unittest.TestCase):
             config["dsh_enabled"] = True
             config["dsh_root"] = str(dsh_root)
             config["codex_enabled"] = False
+            config["antigravity_enabled"] = False
             monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-dep"))
             try:
                 import builtins
@@ -532,6 +538,7 @@ class MonitorTests(unittest.TestCase):
         config["workbuddy_enabled"] = False
         config["dsh_enabled"] = False
         config["codex_enabled"] = True
+        config["antigravity_enabled"] = False
         config["codex_root"] = str(codex_root)
         return module.Monitor(config, root / "monitor", module.logging.getLogger("test-codex"))
 
@@ -1021,6 +1028,7 @@ class MonitorTests(unittest.TestCase):
             config["workbuddy_enabled"] = False
             config["dsh_enabled"] = False
             config["codex_enabled"] = False
+            config["antigravity_enabled"] = False
             monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-health"))
             try:
                 monitor.sync()
@@ -1042,6 +1050,7 @@ class MonitorTests(unittest.TestCase):
             config["workbuddy_enabled"] = False
             config["dsh_enabled"] = False
             config["codex_enabled"] = True
+            config["antigravity_enabled"] = False
             config["codex_root"] = str(root / "no-such-codex-home")
             original = os.environ.pop("CODEX_HOME", None)
             try:
@@ -1878,6 +1887,237 @@ class MonitorTests(unittest.TestCase):
             finally:
                 module.shutil_which = original
             self.assertEqual(detected, source.resolve())
+
+    def test_antigravity_process_detection(self) -> None:
+        self.assertTrue(module.is_antigravity_process_name("Antigravity.exe"))
+        self.assertTrue(module.is_antigravity_process_name("antigravity.exe"))
+        self.assertTrue(module.is_antigravity_process_name("agy.exe"))
+        self.assertTrue(module.is_antigravity_process_name("antigravity-server.exe"))
+        self.assertFalse(module.is_antigravity_process_name("OpenCode.exe"))
+        self.assertIsInstance(module.antigravity_is_running(), bool)
+
+    def test_antigravity_root_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            ag_dir = Path(temp) / "custom_ag"
+            ag_dir.mkdir()
+            (ag_dir / "conversations").mkdir()
+            self.assertEqual(
+                module.detect_antigravity_root({"antigravity_root": str(ag_dir)}),
+                ag_dir.resolve(),
+            )
+            self.assertIsNone(
+                module.detect_antigravity_root({"antigravity_root": str(Path(temp) / "nonexistent")})
+            )
+
+    def test_antigravity_proto_decoders(self) -> None:
+        def encode_varint(v: int) -> bytes:
+            b = bytearray()
+            while v >= 0x80:
+                b.append((v & 0x7F) | 0x80)
+                v >>= 7
+            b.append(v & 0x7F)
+            return bytes(b)
+
+        # Timestamp decode
+        ts_inner = (
+            encode_varint((1 << 3) | 0) + encode_varint(1710000000) +
+            encode_varint((2 << 3) | 0) + encode_varint(500_000_000)
+        )
+        ts_blob = encode_varint((1 << 3) | 2) + encode_varint(len(ts_inner)) + ts_inner
+        self.assertEqual(module._parse_antigravity_step_timestamp(ts_blob), 1710000000500)
+
+        # Gen metadata decode
+        tokens = (
+            encode_varint((2 << 3) | 0) + encode_varint(1200) +
+            encode_varint((5 << 3) | 0) + encode_varint(600) +
+            encode_varint((9 << 3) | 0) + encode_varint(250) +
+            encode_varint((10 << 3) | 0) + encode_varint(350)
+        )
+        tokens_field = encode_varint((4 << 3) | 2) + encode_varint(len(tokens)) + tokens
+        model_str = "gemini-3.8-flash-n".encode("utf-8")
+        model_field = encode_varint((19 << 3) | 2) + encode_varint(len(model_str)) + model_str
+
+        def make_entry(k: str, v: str) -> bytes:
+            kb, vb = k.encode("utf-8"), v.encode("utf-8")
+            entry = (
+                encode_varint((1 << 3) | 2) + encode_varint(len(kb)) + kb +
+                encode_varint((2 << 3) | 2) + encode_varint(len(vb)) + vb
+            )
+            return encode_varint((20 << 3) | 2) + encode_varint(len(entry)) + entry
+
+        req_field = make_entry("request_id", "req-xyz-123")
+        step_field = make_entry("last_step_index", "4")
+        gen_inner = tokens_field + model_field + req_field + step_field
+        gen_blob = encode_varint((1 << 3) | 2) + encode_varint(len(gen_inner)) + gen_inner
+
+        model, req_id, step_idx, parsed_tok = module._parse_antigravity_gen_metadata(gen_blob)
+        self.assertEqual(model, "gemini-3.8-flash-n")
+        self.assertEqual(req_id, "req-xyz-123")
+        self.assertEqual(step_idx, 4)
+        self.assertEqual(parsed_tok[2], 1200)
+        self.assertEqual(parsed_tok[5], 600)
+        self.assertEqual(parsed_tok[9], 250)
+        self.assertEqual(parsed_tok[10], 350)
+
+    def test_antigravity_db_ingest_and_incremental_cursor(self) -> None:
+        def encode_varint(v: int) -> bytes:
+            b = bytearray()
+            while v >= 0x80:
+                b.append((v & 0x7F) | 0x80)
+                v >>= 7
+            b.append(v & 0x7F)
+            return bytes(b)
+
+        def make_ts_blob(sec: int, nano: int = 0) -> bytes:
+            ts = (
+                encode_varint((1 << 3) | 0) + encode_varint(sec) +
+                encode_varint((2 << 3) | 0) + encode_varint(nano)
+            )
+            return encode_varint((1 << 3) | 2) + encode_varint(len(ts)) + ts
+
+        def make_gen_blob(model: str, req_id: str, step_idx: int, in_tok: int, cached: int, reasoning: int, out_tok: int) -> bytes:
+            tokens = (
+                encode_varint((2 << 3) | 0) + encode_varint(in_tok) +
+                encode_varint((5 << 3) | 0) + encode_varint(cached) +
+                encode_varint((9 << 3) | 0) + encode_varint(reasoning) +
+                encode_varint((10 << 3) | 0) + encode_varint(out_tok)
+            )
+            tokens_field = encode_varint((4 << 3) | 2) + encode_varint(len(tokens)) + tokens
+            mb = model.encode("utf-8")
+            model_field = encode_varint((19 << 3) | 2) + encode_varint(len(mb)) + mb
+            def make_entry(k: str, v: str) -> bytes:
+                kb, vb = k.encode("utf-8"), v.encode("utf-8")
+                entry = (
+                    encode_varint((1 << 3) | 2) + encode_varint(len(kb)) + kb +
+                    encode_varint((2 << 3) | 2) + encode_varint(len(vb)) + vb
+                )
+                return encode_varint((20 << 3) | 2) + encode_varint(len(entry)) + entry
+            gen_inner = tokens_field + model_field + make_entry("request_id", req_id) + make_entry("last_step_index", str(step_idx))
+            return encode_varint((1 << 3) | 2) + encode_varint(len(gen_inner)) + gen_inner
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            ag_root = root / "antigravity"
+            ag_root.mkdir()
+            conv_dir = ag_root / "conversations"
+            conv_dir.mkdir()
+
+            s_conn = sqlite3.connect(ag_root / "conversation_summaries.db")
+            s_conn.execute(
+                """
+                CREATE TABLE conversation_summaries (
+                    conversation_id TEXT PRIMARY KEY,
+                    workspace_uris TEXT,
+                    title TEXT,
+                    project_id TEXT,
+                    agent_name TEXT
+                )
+                """
+            )
+            s_conn.execute(
+                "INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?)",
+                ("sess-ag-1", json.dumps(["file:///d:/work/my-project"]), "My AG Project", "p-1", "agy-builder"),
+            )
+            s_conn.commit()
+            s_conn.close()
+
+            sess_db = conv_dir / "sess-ag-1.db"
+            c_conn = sqlite3.connect(sess_db)
+            c_conn.execute(
+                """
+                CREATE TABLE steps (
+                    idx INTEGER PRIMARY KEY,
+                    metadata BLOB
+                )
+                """
+            )
+            c_conn.execute(
+                """
+                CREATE TABLE gen_metadata (
+                    idx INTEGER PRIMARY KEY,
+                    data BLOB,
+                    size INTEGER
+                )
+                """
+            )
+            ts_blob = make_ts_blob(1710000000)
+            c_conn.execute("INSERT INTO steps VALUES (0, ?)", (ts_blob,))
+            gen_blob_0 = make_gen_blob("gemini-3.8-flash-n", "req-0", 0, 1000, 400, 100, 200)
+            c_conn.execute("INSERT INTO gen_metadata VALUES (0, ?, ?)", (gen_blob_0, len(gen_blob_0)))
+            c_conn.commit()
+            c_conn.close()
+
+            empty_source = root / "opencode.db"
+            sqlite3.connect(empty_source).close()
+            config = dict(module.DEFAULT_CONFIG)
+            config["opencode_db"] = str(empty_source)
+            config["workbuddy_enabled"] = False
+            config["dsh_enabled"] = False
+            config["codex_enabled"] = False
+            config["antigravity_enabled"] = True
+            config["antigravity_root"] = str(ag_root)
+
+            monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-ag"))
+            try:
+                res1 = monitor.sync()
+                self.assertEqual(res1.records_seen, 1)
+
+                row = monitor.store.existing_event("antigravity:sess-ag-1:req-0")
+                self.assertIsNotNone(row)
+                self.assertEqual(row["source"], "antigravity")
+                self.assertEqual(row["provider_id"], "google")
+                self.assertEqual(row["model_id"], "gemini-3.8-flash-n")
+                self.assertEqual(row["input_tokens"], 1000)
+                self.assertEqual(row["cache_read_tokens"], 400)
+                self.assertEqual(row["reasoning_tokens"], 100)
+                self.assertEqual(row["output_tokens"], 200)
+                self.assertEqual(row["total_with_cache"], 1700)
+                self.assertEqual(row["total_without_cache_read"], 1300)
+                self.assertEqual(row["project_name"], "my-project")
+                self.assertEqual(row["agent"], "agy-builder")
+
+                # Second sync without changes: 0 records
+                res2 = monitor.sync()
+                self.assertEqual(res2.records_seen, 0)
+
+                # Incremental append: add step 1 and gen 1
+                c_conn = sqlite3.connect(sess_db)
+                c_conn.execute("INSERT INTO steps VALUES (1, ?)", (make_ts_blob(1710000010),))
+                gen_blob_1 = make_gen_blob("gemini-3.8-flash-n", "req-1", 1, 500, 200, 50, 100)
+                c_conn.execute("INSERT INTO gen_metadata VALUES (1, ?, ?)", (gen_blob_1, len(gen_blob_1)))
+                c_conn.commit()
+                c_conn.close()
+                now_val = time.time() + 5
+                os.utime(sess_db, (now_val, now_val))
+
+                res3 = monitor.sync()
+                self.assertEqual(res3.records_seen, 1)
+                count = monitor.store.conn.execute("SELECT COUNT(*) FROM usage_events WHERE source='antigravity'").fetchone()[0]
+                self.assertEqual(count, 2)
+            finally:
+                monitor.close()
+
+    def test_antigravity_health_reporting(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            empty_source = root / "opencode.db"
+            sqlite3.connect(empty_source).close()
+            config = dict(module.DEFAULT_CONFIG)
+            config["opencode_db"] = str(empty_source)
+            config["workbuddy_enabled"] = False
+            config["dsh_enabled"] = False
+            config["codex_enabled"] = False
+            config["antigravity_enabled"] = True
+            config["antigravity_root"] = str(root / "no-such-antigravity")
+            monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-ag-none"))
+            try:
+                self.assertIsNone(monitor.antigravity_root)
+                monitor.sync()
+                health = monitor.store.source_health_report(monitor.source_health)
+                self.assertFalse(health["antigravity"]["available"])
+                self.assertEqual(health["antigravity"]["reason"], "not_found")
+            finally:
+                monitor.close()
 
 
 if __name__ == "__main__":

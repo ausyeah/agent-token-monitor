@@ -770,7 +770,7 @@
         try {
           const result = await callApi("refresh");
           await loadView(true);
-          const running = result.opencode_running || result.workbuddy_running;
+          const running = result.any_running ?? (result.opencode_running || result.workbuddy_running || result.dsh_running || result.codex_running || result.antigravity_running);
           toast(running ? "已同步本地数据" : "没有正在运行的 Agent，仅刷新历史视图");
         } catch (error) {
           toast(`刷新失败：${error}`);
@@ -833,8 +833,7 @@
         return "full";
       }
       function updateLayout() {
-        const dpr=window.devicePixelRatio||1;
-        const layout = layoutFor(window.innerWidth/dpr, window.innerHeight/dpr);
+        const layout = layoutFor(window.innerWidth, window.innerHeight);
         const compact = layout !== "full";
         const mini = layout === "mini";
         const changed = layout !== state.layout;
@@ -1058,7 +1057,7 @@
           lastRenderedAt=Date.now();
           state.data=data; applyTheme(data.theme); const rt=data.runtime||{}; displayCurrency=rt.display_currency||"USD"; usdCnyRate=Number(rt.usd_cny_rate||7.2); updateCurrencyButton(); renderOptions(data.options); renderCurrent();
           const pill=$("#status-pill");
-          const anyRunning=rt.opencode_running||rt.workbuddy_running;
+          const anyRunning=rt.any_running ?? (rt.opencode_running || rt.workbuddy_running || rt.dsh_running || rt.codex_running || rt.antigravity_running);
           pill.className=`status-pill ${rt.last_error?"error":anyRunning?"running":""}`;
           pill.innerHTML=`<span class="status-dot"></span><span>${rt.last_error?"监控错误":anyRunning?"监控运行中":"监控空闲"}</span>`;
           const dailyValue=Number(rt.today?.total_with_cache||0), dailyStep=Math.max(1,Number(rt.daily_alert_tokens||1));
@@ -1068,7 +1067,14 @@
           setText("#pulse-daily",`${compactFmt(dailyValue)} / ${compactFmt(nextDaily)}`); $("#pulse-daily-bar").style.width=`${Math.min(100,dailyValue/nextDaily*100)}%`;
           setText("#pulse-spike",`${compactFmt(spikeValue)} / ${compactFmt(spikeLimit)}`); $("#pulse-spike-bar").style.width=`${Math.min(100,spikeValue/spikeLimit*100)}%`;
           setText("#pulse-pricing",`${exactCoverage.toFixed(1)}%`); $("#pulse-pricing-bar").style.width=`${Math.min(100,exactCoverage)}%`;
-          setText("#footer-source",`最后同步：${rt.last_sync_text||"尚未同步"} · ${rt.timezone||"Local"} · ${rt.source_db||""}${rt.workbuddy_root?` · WorkBuddy: ${rt.workbuddy_root}`:""}`);
+          const roots = [];
+          if (rt.source_db) roots.push(`OpenCode: ${rt.source_db}`);
+          if (rt.workbuddy_root) roots.push(`WorkBuddy: ${rt.workbuddy_root}`);
+          if (rt.dsh_root) roots.push(`DSH: ${rt.dsh_root}`);
+          if (rt.codex_root) roots.push(`Codex: ${rt.codex_root}`);
+          if (rt.antigravity_root) roots.push(`Antigravity: ${rt.antigravity_root}`);
+          const rootInfo = roots.length ? ` · ${roots.join(" · ")}` : "";
+          setText("#footer-source",`最后同步：${rt.last_sync_text||"尚未同步"} · ${rt.timezone||"Local"}${rootInfo}`);
           renderSourceWarning(rt);
           const pricingMode=rt.pricing?.mode||"official"; const multiplier=Number(rt.pricing?.multiplier||1); const pricingLabel=pricingMode==="multiplier"?`${pricingModeLabel(pricingMode)} × ${multiplier}`:pricingModeLabel(pricingMode);
           const currencyNote=displayCurrency==="CNY"?` · 1 USD = ${usdCnyRate.toFixed(4)} CNY`:"";

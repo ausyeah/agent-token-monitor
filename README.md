@@ -25,14 +25,15 @@
 | **Codex** | `$CODEX_HOME/sessions/**/rollout-*.jsonl` | `token_count` 事件的整会话累计值，**逐次做差**得到单次请求用量 |
 | **WorkBuddy** | `~/.workbuddy/projects/**/*.jsonl` | `providerData.rawUsage` 原始计数器 |
 | **DeepSeek Harness** | `~/.dsh/sessions/**/*.jsonl.zstd` | `assistant/message` 的 `usage` |
+| **Antigravity** | `~/.gemini/antigravity/conversations/*.db` | `gen_metadata` 中的 Protobuf token 计数器（支持输入、缓存读取、推理及输出） |
 
-Dashboard 顶部的「来源」下拉可在这四者之间切换；只有一个来源时该控件自动隐藏。
+Dashboard 顶部的「来源」下拉可在各 Agent 之间切换；只有一个来源时该控件自动隐藏。
 
 > WorkBuddy 用积分（Credit）计费且无法换算成 Token 比例，DeepSeek Harness 不记录缓存命中与成本。本工具只呈现各 Agent 真实记录的字段，不做任何推算。
 
 ### 增量同步：为什么每个来源的做法不一样
 
-四个来源的日志形态不同，同步策略也就不同——这不是过度设计，是被各自的写入方式逼出来的：
+各来源的日志形态不同，同步策略也就不同——这不是过度设计，是被各自的写入方式逼出来的：
 
 | 来源 | 写入方式 | 增量策略 |
 | --- | --- | --- |
@@ -40,6 +41,7 @@ Dashboard 顶部的「来源」下拉可在这四者之间切换；只有一个�
 | Codex | 追加写入 JSONL | 字节偏移游标 + **额外保存上一次的累计值**，否则游标后第一条事件会被记成整个会话的总量 |
 | WorkBuddy | 追加写入 JSONL | 按文件大小维护游标，只读新增；文件被截断或改写时自动从头重读 |
 | DeepSeek Harness | zstd 压缩且**原地重写** | 不用字节偏移，改按 `会话 id + 事件序号` 幂等入库 |
+| Antigravity | SQLite 只读库 + Protobuf | 按会话库的生成记录序号游标（`idx`）增量读取，结合文件修改时间缓存优化 |
 
 游标与用量事件在**同一事务内提交**，重复同步不会产生重复记录。
 

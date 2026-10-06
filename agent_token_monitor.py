@@ -105,6 +105,19 @@ CODEX_ROLLOUT_DIRS = ("sessions", "archived_sessions")
 # from consecutive values, so all of them have to be carried in the cursor.
 CODEX_USAGE_FIELDS = ("input", "cached", "cache_write", "output", "reasoning", "total")
 
+ANTIGRAVITY_PROCESS_NAMES = frozenset({"antigravity.exe", "agy.exe", "antigravity-server.exe"})
+ANTIGRAVITY_PROVIDER_ID = "google"
+ANTIGRAVITY_SOURCE = "antigravity"
+ANTIGRAVITY_SOURCE_RANK = 6
+
+ALL_MONITORED_PROCESS_NAMES = (
+    OPENCODE_PROCESS_NAMES
+    | WORKBUDDY_PROCESS_NAMES
+    | DSH_PROCESS_NAMES
+    | CODEX_PROCESS_NAMES
+    | ANTIGRAVITY_PROCESS_NAMES
+)
+
 # Dashboard "source" selector values mapped to the raw ``usage_events.source``
 # values they cover. An empty selection means "all sources", which keeps the
 # original single-source behaviour intact.
@@ -113,14 +126,16 @@ SOURCE_GROUPS: dict[str, tuple[str, ...]] = {
     WORKBUDDY_SOURCE: (WORKBUDDY_SOURCE,),
     DSH_SOURCE: (DSH_SOURCE,),
     CODEX_SOURCE: (CODEX_SOURCE,),
+    ANTIGRAVITY_SOURCE: (ANTIGRAVITY_SOURCE,),
 }
 SOURCE_LABELS: dict[str, str] = {
     "opencode": "OpenCode",
     WORKBUDDY_SOURCE: "WorkBuddy",
     DSH_SOURCE: "DeepSeek Harness",
     CODEX_SOURCE: "Codex",
+    ANTIGRAVITY_SOURCE: "Antigravity",
 }
-SOURCE_ORDER: tuple[str, ...] = ("opencode", WORKBUDDY_SOURCE, DSH_SOURCE, CODEX_SOURCE)
+SOURCE_ORDER: tuple[str, ...] = ("opencode", WORKBUDDY_SOURCE, DSH_SOURCE, CODEX_SOURCE, ANTIGRAVITY_SOURCE)
 DASHBOARD_WINDOW: Any = None
 PRICING_MEMORY: dict[str, Any] = {}
 PRICING_MEMORY_META: dict[str, Any] = {}
@@ -165,6 +180,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "dsh_root": "",
     "codex_enabled": True,
     "codex_root": "",
+    "antigravity_enabled": True,
+    "antigravity_root": "",
     "sample_interval_seconds": 300,
     "daily_alert_tokens": 10_000_000,
     "spike_window_minutes": 30,
@@ -454,18 +471,40 @@ def custom_rates_for_row(config: dict[str, Any] | None, row: dict[str, Any]) -> 
 def load_config(path: Path) -> dict[str, Any]:
     config = dict(DEFAULT_CONFIG)
     if path.exists():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8-sig"))
-            if isinstance(loaded, dict):
-                config.update(loaded)
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"Cannot read config {path}: {exc}") from exc
+        for attempt in range(3):
+            try:
+                text = path.read_text(encoding="utf-8-sig")
+                if not text.strip():
+                    if attempt < 2:
+                        time.sleep(0.05)
+                        continue
+                    return config
+                loaded = json.loads(text)
+                if isinstance(loaded, dict):
+                    config.update(loaded)
+                return config
+            except (OSError, json.JSONDecodeError):
+                if attempt < 2:
+                    time.sleep(0.05)
+                    continue
+                return config
     return config
 
 
 def save_config(path: Path, config: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp_path = path.with_suffix(f".tmp.{os.getpid()}")
+    try:
+        temp_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temp_path, path)
+    except OSError:
+        path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
 
 
 def detect_opencode_db(config: dict[str, Any]) -> Path:
@@ -588,6 +627,42 @@ def detect_codex_root(config: dict[str, Any]) -> Path | None:
     return None
 
 
+def detect_antigravity_root(config: dict[str, Any]) -> Path | None:
+    """Locate the Google Antigravity data directory.
+
+    Google Antigravity stores conversation summaries in
+    ``conversation_summaries.db`` and per-conversation SQLite databases under
+    ``<root>/conversations/<id>.db``, defaulting to ``~/.gemini/antigravity``.
+    """
+    if not config.get("antigravity_enabled", True):
+        return None
+    configured = str(config.get("antigravity_root") or "").strip()
+    if configured:
+        p = Path(configured).expanduser()
+        if (p / "conversations").is_dir() or (p / "conversation_summaries.db").is_file():
+            return p.resolve()
+        return None
+    candidates: list[Path] = []
+    for env_var in ("ANTIGRAVITY_HOME", "ANTIGRAVITY_DATA_DIR", "GEMINI_HOME"):
+        val = os.environ.get(env_var)
+        if val:
+            p = Path(val).expanduser()
+            candidates.append(p)
+            candidates.append(p / "antigravity")
+    home = Path.home()
+    candidates.extend(
+        [
+            home / ".gemini" / "antigravity",
+            home / "AppData" / "Roaming" / "Antigravity",
+            home / "AppData" / "Local" / "antigravity",
+        ]
+    )
+    for candidate in candidates:
+        if (candidate / "conversations").is_dir() or (candidate / "conversation_summaries.db").is_file():
+            return candidate.resolve()
+    return None
+
+
 def is_opencode_process_name(name: str) -> bool:
     return name.strip().lower() in OPENCODE_PROCESS_NAMES
 
@@ -602,6 +677,10 @@ def is_dsh_process_name(name: str) -> bool:
 
 def is_codex_process_name(name: str) -> bool:
     return name.strip().lower() in CODEX_PROCESS_NAMES
+
+
+def is_antigravity_process_name(name: str) -> bool:
+    return name.strip().lower() in ANTIGRAVITY_PROCESS_NAMES
 
 
 def _any_process_running(names: frozenset[str]) -> bool:
@@ -665,14 +744,13 @@ def codex_is_running() -> bool:
     return _any_process_running(CODEX_PROCESS_NAMES)
 
 
+def antigravity_is_running() -> bool:
+    return _any_process_running(ANTIGRAVITY_PROCESS_NAMES)
+
+
 def any_source_running() -> bool:
     """True when at least one monitored application is running."""
-    return (
-        opencode_is_running()
-        or workbuddy_is_running()
-        or dsh_is_running()
-        or codex_is_running()
-    )
+    return _any_process_running(ALL_MONITORED_PROCESS_NAMES)
 
 
 def shutil_which(name: str) -> str | None:
@@ -680,6 +758,137 @@ def shutil_which(name: str) -> str | None:
     import shutil
 
     return shutil.which(name)
+
+
+def safe_open_path(path: Path | str) -> None:
+    """Open a file or directory using the OS file manager safely."""
+    p = Path(path)
+    if hasattr(os, "startfile"):
+        try:
+            os.startfile(p)  # type: ignore[attr-defined]
+            return
+        except OSError:
+            pass
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(p)])
+    else:
+        subprocess.Popen(["xdg-open", str(p)])
+
+
+def _uri_to_path(uri: str) -> str:
+    """Normalize file URI to local filesystem path string."""
+    u = str(uri or "").strip()
+    if u.startswith("file:///"):
+        unq = urllib.parse.unquote(u[7:])
+        if len(unq) >= 3 and unq[0] == "/" and unq[2] == ":":
+            return unq[1:]
+        return unq
+    if u.startswith("file://"):
+        return urllib.parse.unquote(u[7:])
+    return u
+
+
+def _decode_proto(data: bytes) -> list[tuple[int, int, Any]]:
+    """Decode raw protobuf wire format bytes without external dependencies."""
+    pos = 0
+    res: list[tuple[int, int, Any]] = []
+    length = len(data)
+    while pos < length:
+        key = 0
+        shift = 0
+        while pos < length:
+            b = data[pos]
+            pos += 1
+            key |= (b & 0x7F) << shift
+            if not (b & 0x80):
+                break
+            shift += 7
+            if shift >= 70:
+                break
+        field_num = key >> 3
+        wire_type = key & 7
+        if wire_type == 0:  # varint
+            val = 0
+            shift = 0
+            while pos < length:
+                b = data[pos]
+                pos += 1
+                val |= (b & 0x7F) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+                if shift >= 70:
+                    break
+            res.append((field_num, wire_type, val))
+        elif wire_type == 2:  # length-delimited
+            sub_len = 0
+            shift = 0
+            while pos < length:
+                b = data[pos]
+                pos += 1
+                sub_len |= (b & 0x7F) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+                if shift >= 70:
+                    break
+            if pos + sub_len > length:
+                break
+            val_bytes = data[pos : pos + sub_len]
+            pos += sub_len
+            res.append((field_num, wire_type, val_bytes))
+        elif wire_type == 1:  # 64-bit
+            if pos + 8 > length:
+                break
+            res.append((field_num, wire_type, data[pos : pos + 8]))
+            pos += 8
+        elif wire_type == 5:  # 32-bit
+            if pos + 4 > length:
+                break
+            res.append((field_num, wire_type, data[pos : pos + 4]))
+            pos += 4
+        else:
+            break
+    return res
+
+
+def _parse_antigravity_step_timestamp(metadata: bytes) -> int:
+    """Extract millisecond epoch timestamp from Antigravity steps.metadata."""
+    for fn, wt, val in _decode_proto(metadata):
+        if fn == 1 and wt == 2:  # google.protobuf.Timestamp
+            sub = _decode_proto(val)
+            sec = next((v for f, _, v in sub if f == 1 and isinstance(v, int)), 0)
+            nano = next((v for f, _, v in sub if f == 2 and isinstance(v, int)), 0)
+            if sec > 0:
+                return sec * 1000 + (nano // 1_000_000)
+    return 0
+
+
+def _parse_antigravity_gen_metadata(data: bytes) -> tuple[str, str | None, int | None, dict[int, int]]:
+    """Extract model, request_id, last_step_index, and token counts from gen_metadata blob."""
+    model = "unknown"
+    req_id = None
+    last_step_index = None
+    tokens: dict[int, int] = {}
+
+    for fn, wt, val in _decode_proto(data):
+        if fn == 1 and wt == 2:  # GenerationMetadata
+            for fn1, wt1, val1 in _decode_proto(val):
+                if fn1 == 19 and wt1 == 2:
+                    model = val1.decode("utf-8", "ignore") or model
+                elif fn1 == 20 and wt1 == 2:
+                    kv = _decode_proto(val1)
+                    k = next((sub[2].decode("utf-8", "ignore") for sub in kv if sub[0] == 1 and sub[1] == 2), None)
+                    v = next((sub[2].decode("utf-8", "ignore") for sub in kv if sub[0] == 2 and sub[1] == 2), None)
+                    if k == "request_id" and v:
+                        req_id = v
+                    elif k == "last_step_index" and v and v.isdigit():
+                        last_step_index = int(v)
+                elif fn1 == 4 and wt1 == 2:
+                    for fn4, wt4, val4 in _decode_proto(val1):
+                        if wt4 == 0:
+                            tokens[fn4] = val4
+    return model, req_id, last_step_index, tokens
 
 
 @dataclass
@@ -1401,6 +1610,9 @@ class Monitor:
         self.codex_root = detect_codex_root(config)
         if self.codex_root:
             self.config["codex_root"] = str(self.codex_root)
+        self.antigravity_root = detect_antigravity_root(config)
+        if self.antigravity_root:
+            self.config["antigravity_root"] = str(self.antigravity_root)
 
     def _read_source_rows(self, full: bool) -> tuple[list[UsageRecord], dict[str, int]]:
         records: list[UsageRecord] = []
@@ -1409,10 +1621,12 @@ class Monitor:
         # read path never commits and never nests a transaction.
         self._pending_workbuddy_cursors: dict[str, int] = {}
         self._pending_codex_cursors: dict[str, dict[str, Any]] = {}
+        self._pending_antigravity_cursors: dict[str, dict[str, Any]] = {}
         watermarks.update(self._read_opencode_rows(records, full))
         watermarks.update(self._read_workbuddy_rows(records, full))
         watermarks.update(self._read_dsh_rows(records, full))
         watermarks.update(self._read_codex_rows(records, full))
+        watermarks.update(self._read_antigravity_rows(records, full))
         return records, watermarks
 
     def _flush_workbuddy_cursors(self) -> None:
@@ -2332,6 +2546,225 @@ class Monitor:
             cost=safe_float(raw_usage.get("credit")),
         )
 
+    # --- Antigravity ---------------------------------------------------------
+
+    def _antigravity_cursor_key(self) -> str:
+        return "antigravity_scan_offsets"
+
+    def _antigravity_cursors(self) -> dict[str, Any]:
+        try:
+            raw = json.loads(self.store.get_meta(self._antigravity_cursor_key(), "{}"))
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        return {str(k): v for k, v in raw.items() if isinstance(v, (int, dict))}
+
+    def _queue_antigravity_cursor(self, key: str, state: Any) -> None:
+        pending = getattr(self, "_pending_antigravity_cursors", None)
+        if pending is None:
+            pending = self._pending_antigravity_cursors = {}
+        pending[key] = state
+
+    def _flush_antigravity_cursors(self) -> None:
+        pending = getattr(self, "_pending_antigravity_cursors", None)
+        if not pending:
+            return
+        cursors = self._antigravity_cursors()
+        cursors.update(pending)
+        # Drop entries for databases that no longer exist
+        cursors = {key: state for key, state in cursors.items() if Path(key).is_file()}
+        if len(cursors) > 3000:
+            cursors = dict(list(cursors.items())[-2000:])
+        self.store.set_meta(self._antigravity_cursor_key(), json.dumps(cursors))
+        self._pending_antigravity_cursors = {}
+
+    def _read_antigravity_rows(
+        self, records: list[UsageRecord], full: bool
+    ) -> dict[str, int]:
+        """Read Google Antigravity per-conversation SQLite databases.
+
+        Google Antigravity saves conversation summaries in
+        ``<root>/conversation_summaries.db`` and detailed trajectories in
+        ``<root>/conversations/<id>.db``. Token counters and generation
+        metadata are saved inside ``gen_metadata.data`` (protobuf format)
+        and timestamps are preserved in ``steps.metadata``.
+        """
+        if not self.antigravity_root:
+            if self.config.get("antigravity_enabled", True):
+                self.source_health[ANTIGRAVITY_SOURCE] = {
+                    "available": False,
+                    "reason": "not_found",
+                    "detail": str(self.config.get("antigravity_root") or "~/.gemini/antigravity"),
+                }
+            return {}
+        conversations_dir = self.antigravity_root / "conversations"
+        if not conversations_dir.is_dir():
+            self.source_health[ANTIGRAVITY_SOURCE] = {
+                "available": False,
+                "reason": "no_conversations_dir",
+                "detail": str(conversations_dir),
+            }
+            return {}
+        self.source_health[ANTIGRAVITY_SOURCE] = {"available": True, "reason": "", "detail": ""}
+
+        summaries: dict[str, dict[str, str]] = {}
+        summaries_db = self.antigravity_root / "conversation_summaries.db"
+        if summaries_db.is_file():
+            try:
+                uri = f"file:{summaries_db.as_posix()}?mode=ro"
+                s_conn = sqlite3.connect(uri, uri=True, timeout=5)
+                s_conn.row_factory = sqlite3.Row
+                try:
+                    s_conn.execute("PRAGMA busy_timeout=5000")
+                    s_conn.execute("PRAGMA query_only=ON")
+                    for row in s_conn.execute(
+                        "SELECT conversation_id, title, workspace_uris, project_id, agent_name FROM conversation_summaries"
+                    ):
+                        c_id = str(row["conversation_id"] or "")
+                        uris_raw = str(row["workspace_uris"] or "")
+                        p_path = ""
+                        try:
+                            uris = json.loads(uris_raw)
+                            if isinstance(uris, list) and uris:
+                                p_path = _uri_to_path(str(uris[0]))
+                        except (json.JSONDecodeError, ValueError):
+                            p_path = _uri_to_path(uris_raw)
+                        summaries[c_id] = {
+                            "title": str(row["title"] or ""),
+                            "project_path": p_path,
+                            "project_id": str(row["project_id"] or ""),
+                            "agent_name": str(row["agent_name"] or ""),
+                        }
+                finally:
+                    s_conn.close()
+            except (sqlite3.DatabaseError, OSError) as exc:
+                self.logger.warning("Cannot read Antigravity conversation_summaries %s: %s", summaries_db, exc)
+
+        watermarks: dict[str, int] = {}
+        cursors = self._antigravity_cursors()
+
+        for db_path in sorted(conversations_dir.glob("*.db")):
+            key = str(db_path)
+            try:
+                stat = db_path.stat()
+            except OSError:
+                continue
+
+            wal_path = Path(str(db_path) + "-wal")
+            effective_mtime = stat.st_mtime
+            if wal_path.is_file():
+                try:
+                    wal_mtime = wal_path.stat().st_mtime
+                    if wal_mtime > effective_mtime:
+                        effective_mtime = wal_mtime
+                except OSError:
+                    pass
+
+            saved = cursors.get(key)
+            last_idx = -1
+            if isinstance(saved, dict):
+                last_idx = safe_int(saved.get("last_idx", -1))
+                saved_mtime = float(saved.get("mtime", 0.0))
+                if not full and effective_mtime <= saved_mtime:
+                    continue
+            elif isinstance(saved, int):
+                last_idx = saved
+
+            start_idx = -1 if full else last_idx
+            uri = f"file:{db_path.as_posix()}?mode=ro"
+            try:
+                conn = sqlite3.connect(uri, uri=True, timeout=5)
+                conn.row_factory = sqlite3.Row
+            except (sqlite3.DatabaseError, OSError) as exc:
+                self.logger.warning("Cannot open Antigravity database %s: %s", db_path, exc)
+                continue
+
+            session_id = db_path.stem
+            max_seen_idx = last_idx
+            try:
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("PRAGMA query_only=ON")
+                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if "gen_metadata" not in tables:
+                    continue
+
+                step_times: dict[int, int] = {}
+                if "steps" in tables:
+                    for s_row in conn.execute("SELECT idx, metadata FROM steps"):
+                        meta = s_row["metadata"]
+                        if meta:
+                            ts = _parse_antigravity_step_timestamp(meta)
+                            if ts > 0:
+                                step_times[safe_int(s_row["idx"])] = ts
+
+                summary = summaries.get(session_id) or {}
+                project_path = summary.get("project_path", "")
+                project_name = Path(project_path).name if project_path else (summary.get("title") or "antigravity")
+                project_id = summary.get("project_id") or session_id
+                agent = summary.get("agent_name") or "antigravity"
+
+                for g_row in conn.execute("SELECT idx, data FROM gen_metadata WHERE idx > ? ORDER BY idx", (start_idx,)):
+                    gen_idx = safe_int(g_row["idx"])
+                    max_seen_idx = max(max_seen_idx, gen_idx)
+                    data = g_row["data"]
+                    if not data:
+                        continue
+
+                    model, req_id, step_idx, tokens = _parse_antigravity_gen_metadata(data)
+                    event_time = (
+                        step_times.get(step_idx, 0)
+                        if step_idx is not None
+                        else 0
+                    )
+                    if event_time <= 0:
+                        event_time = int(stat.st_mtime * 1000)
+
+                    input_tokens = safe_int(tokens.get(2, 0))
+                    cache_read = safe_int(tokens.get(5, 0))
+                    reasoning = safe_int(tokens.get(9, 0))
+                    if 10 in tokens:
+                        output_tokens = safe_int(tokens[10])
+                    else:
+                        output_tokens = max(0, safe_int(tokens.get(3, 0)) - reasoning)
+
+                    provider_id = PricingCatalog._canonical_provider(model) or ANTIGRAVITY_PROVIDER_ID
+                    message_id = f"antigravity:{session_id}:{req_id or gen_idx}"
+
+                    record = UsageRecord(
+                        message_id=message_id,
+                        source=ANTIGRAVITY_SOURCE,
+                        source_rank=ANTIGRAVITY_SOURCE_RANK,
+                        session_id=session_id,
+                        project_id=project_id,
+                        project_name=project_name,
+                        project_path=project_path,
+                        provider_id=provider_id,
+                        model_id=model,
+                        variant="default",
+                        agent=agent,
+                        event_time=event_time,
+                        source_created=event_time,
+                        source_updated=event_time,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        reasoning_tokens=reasoning,
+                        cache_read_tokens=cache_read,
+                        cache_write_tokens=0,
+                        cost=0.0,
+                    )
+                    records.append(record)
+                    if record.event_time > watermarks.get(ANTIGRAVITY_SOURCE, 0):
+                        watermarks[ANTIGRAVITY_SOURCE] = record.event_time
+
+                self._queue_antigravity_cursor(key, {"last_idx": max_seen_idx, "mtime": effective_mtime})
+            except (sqlite3.DatabaseError, OSError) as exc:
+                self.logger.warning("Error reading Antigravity database %s: %s", db_path, exc)
+            finally:
+                conn.close()
+
+        return watermarks
+
     def _initial_import_done(self) -> bool:
         return self.store.get_meta("initialized") == "1"
 
@@ -2422,6 +2855,7 @@ class Monitor:
             self.store.set_meta("source_health", json.dumps(self.source_health, ensure_ascii=False))
             self._flush_workbuddy_cursors()
             self._flush_codex_cursors()
+            self._flush_antigravity_cursors()
             if full:
                 self.store.set_meta("last_full_reconcile", str(now_ms()))
             if not self._initial_import_done():
@@ -2460,10 +2894,12 @@ class Monitor:
         spike_start = timestamp - max(1, safe_int(self.config["spike_window_minutes"])) * 60 * 1000
         return {
             "timestamp": timestamp,
+            "any_running": any_source_running(),
             "opencode_running": opencode_is_running(),
             "workbuddy_running": workbuddy_is_running(),
             "dsh_running": dsh_is_running(),
             "codex_running": codex_is_running(),
+            "antigravity_running": antigravity_is_running(),
             "day": day,
             "today": self.store.summary(day_start, day_end),
             "seven_days": self.store.summary(week_start, timestamp + 1),
@@ -2802,6 +3238,7 @@ def status_text(status: dict[str, Any], maximum: float) -> str:
     workbuddy = bool(status.get("workbuddy_running"))
     dsh = bool(status.get("dsh_running"))
     codex = bool(status.get("codex_running"))
+    antigravity = bool(status.get("antigravity_running"))
     last_sync = (
         datetime.fromtimestamp(status["last_sync"] / 1000).astimezone().isoformat(timespec="seconds")
         if status["last_sync"]
@@ -2813,7 +3250,8 @@ def status_text(status: dict[str, Any], maximum: float) -> str:
             f"OpenCode: {'running' if running else 'stopped'}"
             f" | WorkBuddy: {'running' if workbuddy else 'stopped'}"
             f" | DSH: {'running' if dsh else 'stopped'}"
-            f" | Codex: {'running' if codex else 'stopped'}",
+            f" | Codex: {'running' if codex else 'stopped'}"
+            f" | AGY: {'running' if antigravity else 'stopped'}",
             f"Today: {format_int(today['total_with_cache'])} tokens",
             f"Cache read: {format_int(today['cache_read_tokens'])}",
             f"Synced: {last_sync}",
@@ -2827,7 +3265,7 @@ def status_text(status: dict[str, Any], maximum: float) -> str:
 
 
 def show_existing_dashboard() -> bool:
-    """Restore and focus an already-running Dashboard window, if present."""
+    """Focus an already-running Dashboard window, if present and visible."""
     if os.name != "nt":
         return False
     try:
@@ -2835,7 +3273,10 @@ def show_existing_dashboard() -> bool:
         hwnd = user32.FindWindowW(None, f"{APP_NAME} {VERSION}")
         if not hwnd:
             return False
-        user32.ShowWindow(hwnd, 9)  # SW_RESTORE also reveals a hidden window.
+        if not user32.IsWindowVisible(hwnd):
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE stale/hidden window
+            return False
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
         user32.SetForegroundWindow(hwnd)
         return True
     except (AttributeError, OSError):
@@ -2964,6 +3405,7 @@ def run_tray(config_path: Path) -> int:
 
     mutex = acquire_single_instance()
     if mutex is None:
+        open_dashboard(config_path)
         return 0
     config = load_config(config_path)
     data_dir = app_data_dir()
@@ -3085,16 +3527,17 @@ def run_tray(config_path: Path) -> int:
         print(f"WorkBuddy: {'运行中' if status.get('workbuddy_running') else '未运行'}")
         print(f"DeepSeek Harness: {'运行中' if status.get('dsh_running') else '未运行'}")
         print(f"Codex: {'运行中' if status.get('codex_running') else '未运行'}")
+        print(f"Antigravity: {'运行中' if status.get('antigravity_running') else '未运行'}")
         print(f"Monitor: {state}")
         print(f"Today: {format_int(today['total_with_cache'])} (cache included)")
         print(f"No cache read: {format_int(today['total_without_cache_read'])}")
         print(f"Open data: {data_dir}")
 
     def open_folder(_icon: Any = None, _item: Any = None) -> None:
-        os.startfile(data_dir)  # type: ignore[attr-defined]
+        safe_open_path(data_dir)
 
     def open_csv(_icon: Any = None, _item: Any = None) -> None:
-        os.startfile(csv_dir)  # type: ignore[attr-defined]
+        safe_open_path(csv_dir)
 
     def test_alert(_icon: Any = None, _item: Any = None) -> None:
         notifier.notify(f"{APP_NAME} 测试", "系统通知、声音和托盘颜色工作正常。", sound=True)
@@ -3114,37 +3557,38 @@ def run_tray(config_path: Path) -> int:
         status = read_status_in_current_thread()
         today = status["today"]
         spike = status["spike_window"]
-        running = bool(status["opencode_running"])
-        startup = "Disable auto-start" if startup_enabled() else "Enable auto-start"
+        any_running = bool(status.get("any_running"))
+        running_label = "Agent: 运行中 — 监控已激活" if any_running else "Agent: 未运行 — 空闲中"
+        startup = "开机自启：已启用" if startup_enabled() else "开机自启：未启用"
         return pystray.Menu(
             pystray.MenuItem(
-                "OpenCode: Running — monitoring active" if running else "OpenCode: Not running — idle",
+                running_label,
                 None,
                 enabled=False,
             ),
             pystray.MenuItem(
-                f"Today: {format_int(today['total_with_cache'])} tokens (cache included)",
+                f"今日用量: {format_int(today['total_with_cache'])} Token (含缓存)",
                 None,
                 enabled=False,
             ),
             pystray.MenuItem(
-                f"Today without cache read: {format_int(today['total_without_cache_read'])}",
+                f"今日排除缓存: {format_int(today['total_without_cache_read'])}",
                 None,
                 enabled=False,
             ),
             pystray.MenuItem(
-                f"Last {config['spike_window_minutes']} min: {format_int(spike['total_with_cache'])}",
+                f"最近 {config['spike_window_minutes']} 分钟: {format_int(spike['total_with_cache'])}",
                 None,
                 enabled=False,
             ),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Open dashboard", lambda _i=None, _m=None: open_dashboard(config_path), default=True),
-            pystray.MenuItem("Refresh now", refresh, enabled=running),
-            pystray.MenuItem("Open data folder", open_folder),
-            pystray.MenuItem("Open CSV folder", open_csv),
-            pystray.MenuItem("Test alert", test_alert),
+            pystray.MenuItem("打开仪表盘", lambda _i=None, _m=None: open_dashboard(config_path), default=True),
+            pystray.MenuItem("立即刷新", refresh, enabled=any_running),
+            pystray.MenuItem("打开数据目录", open_folder),
+            pystray.MenuItem("打开 CSV 目录", open_csv),
+            pystray.MenuItem("测试通知告警", test_alert),
             pystray.MenuItem(startup, toggle_startup),
-            pystray.MenuItem("Exit", quit_app),
+            pystray.MenuItem("退出", quit_app),
         )
 
     icon.menu = menu()
@@ -3239,6 +3683,8 @@ class PricingCatalog:
             "deepseek-v4-flash": ["deepseek-v4-flash-latest"],
         }
         candidates.extend(aliases.get(model, []))
+        if model.endswith("-n"):
+            candidates.append(model[:-2])
         if "/" in model:
             candidates.append(model.rsplit("/", 1)[-1])
         return list(dict.fromkeys(candidates))
@@ -3704,6 +4150,7 @@ class DashboardApi:
                 "alerts": alerts,
                 "comparison": comparison,
                 "runtime": {
+                    "any_running": any_source_running(),
                     "opencode_running": opencode_is_running(),
                     "workbuddy_running": workbuddy_is_running(),
                     "workbuddy_root": str(config.get("workbuddy_root", "")),
@@ -3711,6 +4158,8 @@ class DashboardApi:
                     "dsh_root": str(config.get("dsh_root", "")),
                     "codex_running": codex_is_running(),
                     "codex_root": str(config.get("codex_root", "")),
+                    "antigravity_running": antigravity_is_running(),
+                    "antigravity_root": str(config.get("antigravity_root", "")),
                     "source_health": store.source_health_report(probe_health),
                     "last_sync": last_sync,
                     "last_sync_text": datetime.fromtimestamp(last_sync / 1000).astimezone().strftime("%Y-%m-%d %H:%M:%S") if last_sync else "尚未同步",
@@ -3749,11 +4198,7 @@ class DashboardApi:
         window would poll every few seconds yet still only see data every few
         minutes, because the tray's longer interval owned the staleness check.
         """
-        opencode_running = opencode_is_running()
-        workbuddy_running = workbuddy_is_running()
-        dsh_running = dsh_is_running()
-        codex_running = codex_is_running()
-        if not (opencode_running or workbuddy_running or dsh_running or codex_running):
+        if not any_source_running():
             return {"ok": True, "synced": False, "reason": "idle", "last_sync": 0}
         config = load_config(Path(self._config_path))
         if max_age_seconds is None:
@@ -3779,10 +4224,12 @@ class DashboardApi:
             "synced": True,
             "reason": "stale",
             "last_sync": now_ms(),
-            "opencode_running": opencode_running,
-            "workbuddy_running": workbuddy_running,
-            "dsh_running": dsh_running,
-            "codex_running": codex_running,
+            "any_running": True,
+            "opencode_running": opencode_is_running(),
+            "workbuddy_running": workbuddy_is_running(),
+            "dsh_running": dsh_is_running(),
+            "codex_running": codex_is_running(),
+            "antigravity_running": antigravity_is_running(),
         }
 
     def refresh(self) -> dict[str, Any]:
@@ -3798,10 +4245,12 @@ class DashboardApi:
                 monitor.close()
         return {
             "ok": True,
+            "any_running": any_source_running(),
             "opencode_running": opencode_is_running(),
             "workbuddy_running": workbuddy_is_running(),
             "dsh_running": dsh_is_running(),
             "codex_running": codex_is_running(),
+            "antigravity_running": antigravity_is_running(),
         }
 
     def set_theme(self, theme: str) -> dict[str, str]:
@@ -3918,12 +4367,12 @@ class DashboardApi:
             monitor.close()
 
     def open_data_dir(self) -> dict[str, str]:
-        os.startfile(app_data_dir())  # type: ignore[attr-defined]
+        safe_open_path(app_data_dir())
         return {"path": str(app_data_dir())}
 
     def open_csv_dir(self) -> dict[str, str]:
         path = app_data_dir() / "csv"
-        os.startfile(path)  # type: ignore[attr-defined]
+        safe_open_path(path)
         return {"path": str(path)}
 
     def maximize_window(self) -> dict[str, bool]:
@@ -4002,15 +4451,25 @@ def run_dashboard(config_path: Path) -> int:
     if guard is None and os.name == "nt":
         if show_existing_dashboard():
             return 0
-        # No window to restore, yet the lock is taken. Returning 0 here is what
-        # made a stuck Dashboard look like a failed launch with no output at
-        # all, so say what is holding it and how to get past it.
-        logger.warning("Another Dashboard instance holds the lock; no window to restore")
-        _report_startup_failure(
-            f"另一个 {APP_NAME} 进程正占用 Dashboard 锁，但没有可显示的窗口。\n\n"
-            f"请在任务管理器中结束它，然后重新打开 Dashboard。"
-        )
-        return 0
+        logger.warning("Another Dashboard instance holds the lock; no window to restore, retrying")
+        close_stale_dashboards(logger)
+        guard = acquire_named_mutex(DASHBOARD_MUTEX_NAME, timeout_ms=500)
+        if guard is None:
+            _report_startup_failure(
+                f"另一个 {APP_NAME} 进程正占用 Dashboard 锁。\n\n"
+                f"请在任务管理器中结束它，然后重新打开 Dashboard。"
+            )
+            return 0
+
+    ensure_tray_running(config_path)
+
+    # Disable Chromium GPU hardware acceleration to avoid black-screen / blank window bugs on Windows
+    args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+    if "--disable-gpu" not in args:
+        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
+            args + " --disable-gpu --disable-software-rasterizer"
+        ).strip()
+
     try:
         import webview  # type: ignore
     except ImportError as exc:
@@ -4047,21 +4506,12 @@ def run_dashboard(config_path: Path) -> int:
     global DASHBOARD_WINDOW
     DASHBOARD_WINDOW = window
 
-    tray_start_attempted = False
-
-    def hide_to_tray() -> bool:
-        nonlocal tray_start_attempted
-        if not tray_start_attempted:
-            ensure_tray_running(config_path)
-            tray_start_attempted = True
-        # Returning False cancels pywebview's close event; the native window
-        # remains alive and can be restored from the tray or desktop shortcut.
-        window.hide()
-        return False
-
-    window.events.closing += hide_to_tray
     try:
         webview.start(debug=False, gui="edgechromium")
+    except Exception as exc:
+        logger.exception("Webview start failed: %s", exc)
+        _report_startup_failure(f"仪表盘启动异常: {exc}")
+        return 1
     finally:
         # The lock is process-wide, so release it even on a crash path. Leaving
         # it held is harmless once the process exits, but an explicit release
@@ -4081,6 +4531,7 @@ def print_status(monitor: Monitor, as_json: bool = False) -> None:
         ("WorkBuddy", monitor.workbuddy_root),
         ("DeepSeek", monitor.dsh_root),
         ("Codex", monitor.codex_root),
+        ("Antigravity", monitor.antigravity_root),
     ):
         print(f"{label}: {root or '<not found>'}")
     print(f"Data:   {monitor.data_dir}")
@@ -4127,13 +4578,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    command = args.command or "tray"
+    command = args.command
     # Carry an OpenCode-only installation over before any command opens the
     # database, otherwise the first start after the rename would look empty.
     migrate_legacy_data()
+    if command == "dashboard":
+        return run_dashboard(args.config)
     if command == "tray":
         return run_tray(args.config)
-    if command == "dashboard":
+    if command is None:
+        ensure_tray_running(args.config)
         return run_dashboard(args.config)
 
     config = load_config(args.config)
@@ -4159,6 +4613,7 @@ def main(argv: list[str] | None = None) -> int:
             ("workbuddy_root", detect_workbuddy_root),
             ("dsh_root", detect_dsh_root),
             ("codex_root", detect_codex_root),
+            ("antigravity_root", detect_antigravity_root),
         ):
             root = detect(config)
             print(f"{label}={root or '<not found>'}")
