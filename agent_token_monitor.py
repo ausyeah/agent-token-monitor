@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 import winsound
@@ -4472,9 +4473,11 @@ def run_dashboard(config_path: Path) -> int:
 
     try:
         import webview  # type: ignore
-    except ImportError as exc:
+    except Exception as exc:
         release_named_mutex(guard)
-        raise RuntimeError("pywebview is required to run the desktop dashboard") from exc
+        logger.exception("Failed to import pywebview: %s", exc)
+        _report_startup_failure(f"无法启动界面引擎 (pywebview): {exc}")
+        return 1
 
     try:
         html = load_dashboard_html()

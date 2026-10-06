@@ -5,13 +5,26 @@ webview_datas, webview_binaries, webview_hidden = collect_all("webview")
 clr_datas, clr_binaries, clr_hidden = collect_all("clr")
 loader_datas, loader_binaries, loader_hidden = collect_all("clr_loader")
 pythonnet_datas, pythonnet_binaries, pythonnet_hidden = collect_all("pythonnet")
+bottle_datas, bottle_binaries, bottle_hidden = collect_all("bottle")
 
-datas = webview_datas + clr_datas + loader_datas + pythonnet_datas + [
+datas = webview_datas + clr_datas + loader_datas + pythonnet_datas + bottle_datas + [
     ("dashboard.html", "."),
     ("assets/app.ico", "assets"),
 ]
-binaries = webview_binaries + clr_binaries + loader_binaries + pythonnet_binaries
-hiddenimports = webview_hidden + clr_hidden + loader_hidden + pythonnet_hidden
+binaries = webview_binaries + clr_binaries + loader_binaries + pythonnet_binaries + bottle_binaries
+hiddenimports = (
+    webview_hidden
+    + clr_hidden
+    + loader_hidden
+    + pythonnet_hidden
+    + bottle_hidden
+    + [
+        "unicodedata",
+        "wsgiref",
+        "wsgiref.simple_server",
+        "http.server",
+    ]
+)
 
 a = Analysis(
     ["agent_token_monitor.py"],
