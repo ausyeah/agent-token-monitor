@@ -176,20 +176,21 @@
     .hero-stat-label { color: var(--muted); font-size: 12px; }
     .hero-stat-value { margin-top: 10px; font-family: var(--font-display); font-size: clamp(25px,3vw,36px); line-height: 1.1; font-weight: 400; font-variant-numeric: lining-nums tabular-nums; }
     .hero-stat-note { margin-top: 5px; color: var(--subtle); font-size: 10px; white-space: normal; line-height: 1.45; }
-    .metric-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; margin-top: 24px; }
+    .metric-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; margin-top: 24px; }
     .metric { padding: 16px 17px; background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: var(--radius-md); }
     .metric-label { color: var(--muted); font-size: 11px; display: flex; align-items: center; gap: 7px; }
     .metric-mark { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
     .metric-value { margin-top: 8px; font-size: 20px; font-weight: 700; letter-spacing: -.02em; }
-    .cache-row { display: grid; grid-template-columns: auto minmax(80px, 1fr) auto minmax(0, auto); align-items: center; gap: 14px; margin-top: 18px; }
+    .cache-row { display: flex; flex-direction: column; gap: 9px; margin-top: 20px; }
+    .cache-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .cache-label, .cache-value { color: var(--muted); font-size: 12px; }
     .cache-value { color: var(--success); font-weight: 700; white-space: nowrap; }
     #hit-rate { display: none; } /* Redundant with hero hit-rate card and avoids collision with share percentage */
-    /* Share readout beside the composition bar: which part of the bar is what.
-       It is allowed to wrap and shrink so the bar itself is never squeezed out. */
-    .token-share { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px 9px; color: var(--muted); font-size: 11px; min-width: 0; }
+    /* grid-template-columns: auto minmax(80px, 1fr) auto minmax(0, auto); */
+    /* Share readout above the composition bar: which part of the bar is what. */
+    .token-share { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 11px; min-width: 0; }
     .token-share:empty { display: none; }
-    .token-share .share-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+    .token-share .share-item { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
     .token-share .share-item i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; flex: 0 0 auto; }
     .token-share .share-item i.input { background: #6f9cf4; }
     .token-share .share-item i.output { background: #73c69a; }
@@ -204,7 +205,7 @@
     .cache-segment.reasoning { background: #b18be8; }
     .cache-segment.cache_hit { background: #e1aa68; }
     .cache-segment:hover { filter: brightness(1.15); }
-    .cache-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 10px 0 0 74px; color: var(--muted); font-size: 11px; }
+    .cache-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 10px 0 0 0; color: var(--muted); font-size: 11px; }
     .cache-legend span { display: inline-flex; align-items: center; gap: 5px; }
     .cache-legend i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
     .cache-legend .input { background: #6f9cf4; }
@@ -599,7 +600,7 @@
               </div>
             </div>
             <div class="metric-grid" id="metric-grid"></div>
-            <div class="cache-row"><span class="cache-label">Token 构成</span><div id="cache-stack" class="cache-stack" role="img" aria-label="Token 构成比例"></div><span id="hit-rate" class="cache-value">命中 0.0%</span><span id="token-share" class="token-share"></span></div>
+            <div class="cache-row"><div class="cache-head"><span class="cache-label">Token 构成</span><span id="token-share" class="token-share"></span></div><div id="cache-stack" class="cache-stack" role="img" aria-label="Token 构成比例"></div><span id="hit-rate" class="cache-value">命中 0.0%</span></div>
              <div id="cache-legend" class="cache-legend"><span><i class="input"></i>输入 <b data-cache-value="input">—</b></span><span><i class="output"></i>输出 <b data-cache-value="output">—</b></span><span><i class="reasoning"></i>推理 <b data-cache-value="reasoning">—</b></span><span><i class="cache_hit"></i>缓存命中 <b data-cache-value="cache_hit">—</b></span></div>
           </article>
 
@@ -941,7 +942,7 @@
           const pctText = pct < 0.05 && pct > 0 ? "<0.1%" : `${pct.toFixed(1)}%`;
           node.innerHTML = `${compactFmt(val)} <span style="font-weight:400;opacity:0.8;font-size:10px">(${pctText})</span>`;
         });
-        const metrics = [["输入 Token","input_tokens"],["输出 Token","output_tokens"],["推理 Token","reasoning_tokens"],["缓存命中",cacheHitTokens],["不含缓存","total_without_cache_read"]];
+        const metrics = [["输入 Token","input_tokens"],["输出 Token","output_tokens"],["推理 Token","reasoning_tokens"],["缓存命中",cacheHitTokens]];
         $("#metric-grid").innerHTML = metrics.map(([label,get]) => `<div class="metric"><div class="metric-label"><span class="metric-mark"></span>${label}</div><div class="metric-value">${compactFmt(typeof get==="function"?get(s):s[get])}</div></div>`).join("");
         const unit = data.granularity === "hour" ? "按小时" : "按天"; const caption = `${({today:"今日","24h":"最近24小时","7d":"7天","30d":"30天","90d":"90天",all:"全部",custom:"自定义"})[state.period]} · ${unit}`;
         setText("#trend-caption", caption); setText("#compact-trend-caption", caption); renderRanking("#provider-ranking", data.providers || []); renderRanking("#model-ranking", data.models || []);
