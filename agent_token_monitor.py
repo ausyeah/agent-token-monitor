@@ -3655,17 +3655,63 @@ def status_text(status: dict[str, Any], maximum: float) -> str:
     return title[:127]
 
 
+def find_dashboard_window() -> int:
+    """Find the Dashboard window handle, checking exact and prefix titles."""
+    if os.name != "nt":
+        return 0
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.FindWindowW(None, f"{APP_NAME} {VERSION}")
+        if hwnd:
+            return hwnd
+        hwnd = user32.FindWindowW(None, APP_NAME)
+        if hwnd:
+            return hwnd
+
+        found = 0
+
+        def callback(h: Any, _ctx: Any) -> bool:
+            nonlocal found
+            length = user32.GetWindowTextLengthW(h)
+            if length > 0:
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(h, buffer, length + 1)
+                title = buffer.value
+                if title.startswith(APP_NAME):
+                    found = int(h)
+                    return False
+            return True
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        user32.EnumWindows(WNDENUMPROC(callback), 0)
+        return found
+    except Exception:
+        return 0
+
+
 def show_existing_dashboard() -> bool:
     """Restore and focus an already-running Dashboard window, if present."""
     if os.name != "nt":
         return False
     try:
         user32 = ctypes.windll.user32
-        hwnd = user32.FindWindowW(None, f"{APP_NAME} {VERSION}")
+        hwnd = find_dashboard_window()
         if not hwnd:
             return False
         user32.ShowWindow(hwnd, 9)  # SW_RESTORE reveals both minimized and hidden windows
+        user32.ShowWindow(hwnd, 5)  # SW_SHOW
+        user32.BringWindowToTop(hwnd)
         user32.SetForegroundWindow(hwnd)
+        try:
+            fg_hwnd = user32.GetForegroundWindow()
+            if fg_hwnd and fg_hwnd != hwnd:
+                fg_tid = user32.GetWindowThreadProcessId(fg_hwnd, None)
+                own_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+                user32.AttachThreadInput(own_tid, fg_tid, True)
+                user32.SetForegroundWindow(hwnd)
+                user32.AttachThreadInput(own_tid, fg_tid, False)
+        except Exception:
+            pass
         return True
     except (AttributeError, OSError):
         return False
@@ -4103,8 +4149,34 @@ def run_tray(config_path: Path, companion: bool = False) -> int:
     icon.menu = pystray.Menu(generate_menu_items)
     threading.Thread(target=worker, daemon=True).start()
 
+    if os.name == "nt":
+        try:
+            from pystray._util import win32  # type: ignore
+
+            orig_notify = icon._message_handlers.get(win32.WM_NOTIFY)
+
+            def _custom_on_notify(wparam: int, lparam: int) -> int:
+                # 0x0202: WM_LBUTTONUP, 0x0203: WM_LBUTTONDBLCLK, 0x0400: NIN_SELECT, 0x0401: NIN_KEYSELECT
+                if lparam in (win32.WM_LBUTTONUP, 0x0203, 0x0400, 0x0401):
+                    threading.Thread(target=open_dashboard, args=(config_path,), daemon=True).start()
+                    return 0
+                if orig_notify:
+                    return int(orig_notify(wparam, lparam) or 0)
+                return 0
+
+            icon._message_handlers[win32.WM_NOTIFY] = _custom_on_notify
+        except Exception as exc:
+            logger.debug("Failed to hook tray message handler: %s", exc)
+
     def _on_setup(i: Any) -> None:
         ensure_interactive_desktop()
+        if os.name == "nt":
+            try:
+                from pystray._util import win32  # type: ignore
+                if win32.WM_NOTIFY in i._message_handlers and i._message_handlers[win32.WM_NOTIFY] != _custom_on_notify:
+                    i._message_handlers[win32.WM_NOTIFY] = _custom_on_notify
+            except Exception:
+                pass
         if is_companion and not initially_running:
             i.visible = False
         else:
@@ -4925,15 +4997,36 @@ class DashboardApi:
             DASHBOARD_WINDOW.maximize()
         return {"ok": True}
 
-    def restore_window(self) -> dict[str, bool]:
-        """Put the window back to the size it opens at.
+    def shrink_to_card(self) -> dict[str, Any]:
+        """Shrink Dashboard into a compact floating mini card."""
+        global DASHBOARD_WINDOW
+        if DASHBOARD_WINDOW is None:
+            return {"ok": False}
+        try:
+            DASHBOARD_WINDOW.restore()
+        except Exception:
+            pass
+        DASHBOARD_WINDOW.resize(360, 480)
+        try:
+            DASHBOARD_WINDOW.on_top = True
+        except Exception:
+            pass
+        return {"ok": True, "on_top": getattr(DASHBOARD_WINDOW, "on_top", True)}
 
-        The single card layout appears when the window has been dragged to its
-        minimum, and the way out of it is a button on that card. Maximising would
-        not be the way back: the reader came from the ordinary page, so that is
-        the size to return to, and the default is recomputed the same way it was
-        at startup so a smaller screen is still respected.
-        """
+    def toggle_pin_window(self) -> dict[str, Any]:
+        """Toggle always-on-top for the dashboard window."""
+        global DASHBOARD_WINDOW
+        if DASHBOARD_WINDOW is None:
+            return {"ok": False, "on_top": False}
+        try:
+            new_state = not getattr(DASHBOARD_WINDOW, "on_top", False)
+            DASHBOARD_WINDOW.on_top = new_state
+            return {"ok": True, "on_top": new_state}
+        except Exception:
+            return {"ok": False, "on_top": False}
+
+    def restore_window(self) -> dict[str, bool]:
+        """Put the window back to the full dashboard size."""
         if DASHBOARD_WINDOW is None:
             return {"ok": False}
         width, height = _fit_window_to_screen(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
@@ -4942,6 +5035,10 @@ class DashboardApi:
         except Exception:
             pass
         DASHBOARD_WINDOW.resize(width, height)
+        try:
+            DASHBOARD_WINDOW.on_top = False
+        except Exception:
+            pass
         return {"ok": True}
 
     def get_app_settings(self) -> dict[str, Any]:

@@ -514,6 +514,7 @@
        the expand button beside it stays for the ordinary compact layout. */
     body[data-layout="mini"] .mini-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
     body[data-layout="mini"] #expand-button { display: none; }
+    .mini-actions .icon-button.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
     /* The window can get down to about 240 CSS pixels wide, where two columns of
        figures and the legend cannot both fit: the content stops wrapping and
        spills past the window edge, which is what the reader sees as the card
@@ -543,6 +544,10 @@
       </div>
       <div class="top-actions">
         <div id="status-pill" class="status-pill"><span class="status-dot"></span><span>正在连接</span></div>
+        <button id="mini-card-button" class="soft-button" title="一键缩成最小卡片 (常驻悬浮模式)">
+          <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3" stroke-width="1.8"/><rect x="11" y="11" width="9" height="9" rx="2" fill="currentColor" fill-opacity="0.25" stroke-width="1.6"/></svg>
+          <span>迷你卡片</span>
+        </button>
         <button id="theme-button" class="icon-button" title="切换主题" aria-label="切换主题">
           <svg class="icon" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9Z"/></svg>
         </button>
@@ -575,7 +580,7 @@
       <div class="filter-field" id="model-field"><label for="model-filter">模型</label><select id="model-filter"><option>全部模型</option></select></div>
       <div class="filter-field" id="source-field"><select id="source-filter" aria-label="数据来源"><option value="">全部来源</option></select></div>
       <button id="reset-button" class="soft-button">重置筛选</button>
-      <div class="control-quick-actions"><button id="settings-quick-button" class="quick-button" title="打开系统设置">设置</button><button id="pricing-quick-button" class="quick-button" title="打开价格设置">价格</button><button id="currency-quick-button" class="quick-button" title="切换美元/人民币">$</button></div>
+      <div class="control-quick-actions"><button id="mini-card-quick-button" class="quick-button" title="一键缩成最小卡片">卡片</button><button id="settings-quick-button" class="quick-button" title="打开系统设置">设置</button><button id="pricing-quick-button" class="quick-button" title="打开价格设置">价格</button><button id="currency-quick-button" class="quick-button" title="切换美元/人民币">$</button></div>
     </section>
     <button id="active-filter-summary" class="active-filter-summary" hidden></button>
     <div id="source-warning" class="source-warning" hidden></div>
@@ -651,7 +656,7 @@
 
         <div class="compact-overview">
           <article class="card compact-hero">
-            <div class="compact-top"><div><div class="scope-line"><span class="scope-mark"></span><span id="compact-scope">全部供应商</span></div><div id="compact-total" class="compact-number">—</div><div class="compact-caption">当前周期 Token · 悬停趋势查看详情</div></div><button id="expand-button" class="icon-button" title="扩大窗口"><svg class="icon" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5"/></svg></button><div class="mini-actions"><button id="mini-refresh" class="icon-button" title="刷新数据" aria-label="刷新数据"><svg class="icon" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button><button id="mini-restore" class="icon-button" title="恢复默认大小" aria-label="恢复默认大小"><svg class="icon" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5"/></svg></button></div></div>
+            <div class="compact-top"><div><div class="scope-line"><span class="scope-mark"></span><span id="compact-scope">全部供应商</span></div><div id="compact-total" class="compact-number">—</div><div class="compact-caption">当前周期 Token · 悬停趋势查看详情</div></div><button id="expand-button" class="icon-button" title="扩大窗口"><svg class="icon" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5"/></svg></button><div class="mini-actions"><button id="mini-pin" class="icon-button" title="窗口置顶" aria-label="窗口置顶"><svg class="icon" viewBox="0 0 24 24"><path d="M12 2v8m-5 0h10l-2 7H9l-2-7Zm3 15v5"/></svg></button><button id="mini-refresh" class="icon-button" title="刷新数据" aria-label="刷新数据"><svg class="icon" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button><button id="mini-restore" class="icon-button" title="恢复默认大小" aria-label="恢复默认大小"><svg class="icon" viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5"/></svg></button></div></div>
             <div class="compact-stats"><div class="compact-stat"><span>请求次数</span><strong id="compact-requests">—</strong></div><div class="compact-stat"><span>参考成本</span><strong id="compact-cost">—</strong></div><div class="compact-stat"><span>缓存命中</span><strong id="compact-cache">—</strong></div><div class="compact-stat"><span>缓存命中率</span><strong id="compact-hit">—</strong></div></div>
             <div class="compact-cache-row"><div class="compact-cache-head"><span>Token 构成</span><strong id="compact-cache-hit">命中 0.0%</strong></div><div id="compact-cache-stack" class="cache-stack" role="img" aria-label="紧凑 Token 构成比例"></div><div id="compact-token-share" class="token-share"></div><div id="compact-cache-legend" class="cache-legend compact-cache-legend"><span><i class="input"></i>输入 <b data-cache-value="input">—</b></span><span><i class="output"></i>输出 <b data-cache-value="output">—</b></span><span><i class="reasoning"></i>推理 <b data-cache-value="reasoning">—</b></span><span><i class="cache_hit"></i>缓存命中 <b data-cache-value="cache_hit">—</b></span></div></div>
           </article>
@@ -1212,6 +1217,29 @@
         $("#export-button").addEventListener("click",async()=>{try{await callApi("export_csv");toast("CSV 已导出");}catch(error){toast(`导出失败：${error}`);}});
         $("#data-button").addEventListener("click",()=>callApi("open_data_dir")); $("#expand-button").addEventListener("click",()=>callApi("maximize_window"));
         $("#mini-restore").addEventListener("click",()=>callApi("restore_window"));
+        const shrinkToCard = async () => {
+          try {
+            const res = await callApi("shrink_to_card");
+            if (res && res.on_top !== undefined) {
+              $("#mini-pin")?.classList.toggle("active", !!res.on_top);
+            }
+          } catch(err) {
+            toast(`缩小卡片失败：${err}`);
+          }
+        };
+        const togglePin = async () => {
+          try {
+            const res = await callApi("toggle_pin_window");
+            const onTop = !!(res && res.on_top);
+            $("#mini-pin")?.classList.toggle("active", onTop);
+            toast(onTop ? "已置顶卡片（悬浮在桌面最上方）" : "已取消卡片置顶");
+          } catch(err) {
+            toast(`置顶设置失败：${err}`);
+          }
+        };
+        $("#mini-card-button")?.addEventListener("click", shrinkToCard);
+        $("#mini-card-quick-button")?.addEventListener("click", shrinkToCard);
+        $("#mini-pin")?.addEventListener("click", togglePin);
         const toggleCurrency = async()=>{try{const next=displayCurrency==="CNY"?"USD":"CNY";const result=await callApi("set_display_currency",next,usdCnyRate);displayCurrency=result.display_currency;usdCnyRate=Number(result.usd_cny_rate||usdCnyRate);updateCurrencyButton();$("#currency-quick-button").textContent=displayCurrency==="CNY"?"¥":"$";await loadView();toast(next==="CNY"?`已切换人民币，1 USD = ${usdCnyRate.toFixed(4)} CNY`:"已切换美元");}catch(error){toast(`切换货币失败：${error}`);}};
         $("#currency-button").addEventListener("click",toggleCurrency); $("#currency-quick-button").addEventListener("click",toggleCurrency);
         $("#pricing-quick-button").addEventListener("click",openPricingSettings);
