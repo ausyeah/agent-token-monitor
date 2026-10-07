@@ -5007,23 +5007,7 @@ class DashboardApi:
         except Exception:
             pass
         DASHBOARD_WINDOW.resize(360, 480)
-        try:
-            DASHBOARD_WINDOW.on_top = True
-        except Exception:
-            pass
-        return {"ok": True, "on_top": getattr(DASHBOARD_WINDOW, "on_top", True)}
-
-    def toggle_pin_window(self) -> dict[str, Any]:
-        """Toggle always-on-top for the dashboard window."""
-        global DASHBOARD_WINDOW
-        if DASHBOARD_WINDOW is None:
-            return {"ok": False, "on_top": False}
-        try:
-            new_state = not getattr(DASHBOARD_WINDOW, "on_top", False)
-            DASHBOARD_WINDOW.on_top = new_state
-            return {"ok": True, "on_top": new_state}
-        except Exception:
-            return {"ok": False, "on_top": False}
+        return {"ok": True}
 
     def restore_window(self) -> dict[str, bool]:
         """Put the window back to the full dashboard size."""
@@ -5035,10 +5019,6 @@ class DashboardApi:
         except Exception:
             pass
         DASHBOARD_WINDOW.resize(width, height)
-        try:
-            DASHBOARD_WINDOW.on_top = False
-        except Exception:
-            pass
         return {"ok": True}
 
     def get_app_settings(self) -> dict[str, Any]:
