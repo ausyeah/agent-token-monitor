@@ -94,6 +94,7 @@ class MonitorTests(unittest.TestCase):
             config["dsh_enabled"] = False
             config["codex_enabled"] = False
             config["antigravity_enabled"] = False
+            config["pi_enabled"] = False
             logger = module.logging.getLogger("test-monitor")
             monitor = module.Monitor(config, data, logger)
             try:
@@ -298,6 +299,7 @@ class MonitorTests(unittest.TestCase):
             config["dsh_enabled"] = False
             config["codex_enabled"] = False
             config["antigravity_enabled"] = False
+            config["pi_enabled"] = False
             config["opencode_db"] = str(empty_source)
             monitor = module.Monitor(config, data, module.logging.getLogger("test-workbuddy"))
             try:
@@ -407,6 +409,7 @@ class MonitorTests(unittest.TestCase):
             config["dsh_root"] = str(dsh_root)
             config["codex_enabled"] = False
             config["antigravity_enabled"] = False
+            config["pi_enabled"] = False
             monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-dsh"))
             try:
                 self.assertEqual(monitor.sync().records_seen, 2)
@@ -462,6 +465,7 @@ class MonitorTests(unittest.TestCase):
             config["dsh_root"] = str(dsh_root)
             config["codex_enabled"] = False
             config["antigravity_enabled"] = False
+            config["pi_enabled"] = False
             monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-dep"))
             try:
                 import builtins
@@ -540,6 +544,7 @@ class MonitorTests(unittest.TestCase):
         config["dsh_enabled"] = False
         config["codex_enabled"] = True
         config["antigravity_enabled"] = False
+        config["pi_enabled"] = False
         config["codex_root"] = str(codex_root)
         return module.Monitor(config, root / "monitor", module.logging.getLogger("test-codex"))
 
@@ -1030,6 +1035,7 @@ class MonitorTests(unittest.TestCase):
             config["dsh_enabled"] = False
             config["codex_enabled"] = False
             config["antigravity_enabled"] = False
+            config["pi_enabled"] = False
             monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-health"))
             try:
                 monitor.sync()
@@ -1052,6 +1058,7 @@ class MonitorTests(unittest.TestCase):
             config["dsh_enabled"] = False
             config["codex_enabled"] = True
             config["antigravity_enabled"] = False
+            config["pi_enabled"] = False
             config["codex_root"] = str(root / "no-such-codex-home")
             original = os.environ.pop("CODEX_HOME", None)
             try:
@@ -2057,6 +2064,7 @@ class MonitorTests(unittest.TestCase):
             config["codex_enabled"] = False
             config["antigravity_enabled"] = True
             config["antigravity_root"] = str(ag_root)
+            config["pi_enabled"] = False
 
             monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-ag"))
             try:
@@ -2110,6 +2118,7 @@ class MonitorTests(unittest.TestCase):
             config["codex_enabled"] = False
             config["antigravity_enabled"] = True
             config["antigravity_root"] = str(root / "no-such-antigravity")
+            config["pi_enabled"] = False
             monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-ag-none"))
             try:
                 self.assertIsNone(monitor.antigravity_root)
@@ -2229,6 +2238,174 @@ class MonitorTests(unittest.TestCase):
                 self.assertIn("past_24h", status)
                 self.assertIn("total_with_cache", status["past_24h"])
                 self.assertIn("total_without_cache_read", status["past_24h"])
+            finally:
+                monitor.close()
+
+    def test_pi_process_detection(self) -> None:
+        self.assertTrue(module.is_pi_process_name("PI-Desktop.exe"))
+        self.assertTrue(module.is_pi_process_name("pi-desktop.exe"))
+        self.assertTrue(module.is_pi_process_name("pi-desktop-host-core.exe"))
+        self.assertTrue(module.is_pi_process_name("pi.exe"))
+        self.assertFalse(module.is_pi_process_name("OpenCode.exe"))
+        self.assertIsInstance(module.pi_is_running(), bool)
+
+    def test_pi_root_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            pi_dir = Path(temp) / "custom_pi"
+            pi_dir.mkdir()
+            sqlite3.connect(pi_dir / "pi.sqlite").close()
+            self.assertEqual(
+                module.detect_pi_root({"pi_root": str(pi_dir)}),
+                pi_dir.resolve(),
+            )
+            self.assertIsNone(
+                module.detect_pi_root({"pi_root": str(Path(temp) / "nonexistent")})
+            )
+
+    def test_pi_db_ingest_and_incremental_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pi_root = root / ".pi-desktop"
+            pi_root.mkdir()
+            db_path = pi_root / "pi.sqlite"
+
+            conn = sqlite3.connect(db_path)
+            conn.executescript("""
+                CREATE TABLE providers (id TEXT PRIMARY KEY, name TEXT, vendor_key TEXT);
+                CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT, path TEXT);
+                CREATE TABLE scheduled_tasks (id TEXT PRIMARY KEY, title TEXT);
+                CREATE TABLE task_runs (id TEXT PRIMARY KEY, task_id TEXT, session_id TEXT);
+                CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, project_id INTEGER, provider_id TEXT, model_id TEXT);
+                CREATE TABLE turns (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    status TEXT,
+                    provider_id TEXT,
+                    model_id TEXT,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    usage_json TEXT,
+                    started_at INTEGER,
+                    ended_at INTEGER
+                );
+            """)
+
+            conn.execute("INSERT INTO providers VALUES ('prov-1', 'sencenova', 'custom')")
+            conn.execute("INSERT INTO projects VALUES (1, 'my-pi-project', 'D:/work/my-pi')")
+            conn.execute("INSERT INTO scheduled_tasks VALUES ('task-1', '定时规划任务')")
+            conn.execute("INSERT INTO task_runs VALUES ('run-1', 'task-1', 'sess-pi-1')")
+            conn.execute("INSERT INTO sessions VALUES ('sess-pi-1', '定时会话', 1, 'prov-1', 'deepseek-v4-flash')")
+
+            usage_0 = {
+                "aggregation": "operation",
+                "operations": [
+                    {
+                        "modelId": "deepseek-v4-flash",
+                        "providerId": "prov-1",
+                        "inputTokens": 1000,
+                        "outputTokens": 300,
+                        "reasoningTokens": 100,
+                        "cacheReadTokens": 400,
+                        "cacheWriteTokens": 50,
+                        "cost": {"total": 0.005},
+                    }
+                ]
+            }
+            conn.execute(
+                "INSERT INTO turns VALUES ('turn-1', 'sess-pi-1', 'completed', 'prov-1', 'deepseek-v4-flash', 1000, 300, ?, 1710000000, 1710001000)",
+                (json.dumps(usage_0),),
+            )
+            conn.commit()
+            conn.close()
+
+            empty_source = root / "opencode.db"
+            sqlite3.connect(empty_source).close()
+            config = dict(module.DEFAULT_CONFIG)
+            config["opencode_db"] = str(empty_source)
+            config["workbuddy_enabled"] = False
+            config["dsh_enabled"] = False
+            config["codex_enabled"] = False
+            config["antigravity_enabled"] = False
+            config["pi_enabled"] = True
+            config["pi_root"] = str(pi_root)
+
+            monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-pi"))
+            try:
+                res1 = monitor.sync()
+                self.assertEqual(res1.records_seen, 1)
+
+                row = monitor.store.existing_event("pi:sess-pi-1:turn-1:0")
+                self.assertIsNotNone(row)
+                self.assertEqual(row["source"], "pi")
+                self.assertEqual(row["provider_id"], "sencenova")
+                self.assertEqual(row["model_id"], "deepseek-v4-flash")
+                self.assertEqual(row["input_tokens"], 1000)
+                self.assertEqual(row["cache_read_tokens"], 400)
+                self.assertEqual(row["reasoning_tokens"], 100)
+                self.assertEqual(row["output_tokens"], 200)
+                self.assertEqual(row["total_with_cache"], 1750)
+                self.assertEqual(row["total_without_cache_read"], 1350)
+                self.assertEqual(row["project_name"], "my-pi-project")
+                self.assertEqual(row["project_path"], "D:/work/my-pi")
+                self.assertEqual(row["agent"], "pi")
+                self.assertEqual(row["cost"], 0.005)
+
+                # Second sync without changes: 0 records
+                res2 = monitor.sync()
+                self.assertEqual(res2.records_seen, 0)
+
+                # Add turn-2 from scheduled task
+                conn = sqlite3.connect(db_path)
+                usage_1 = {
+                    "operations": [
+                        {
+                            "modelId": "deepseek-v4-flash",
+                            "providerId": "prov-1",
+                            "inputTokens": 2000,
+                            "outputTokens": 500,
+                            "reasoningTokens": 150,
+                            "cacheReadTokens": 1000,
+                            "cacheWriteTokens": 0,
+                        }
+                    ]
+                }
+                conn.execute(
+                    "INSERT INTO turns VALUES ('turn-2', 'sess-pi-1', 'completed', 'prov-1', 'deepseek-v4-flash', 2000, 500, ?, 1710005000, 1710006000)",
+                    (json.dumps(usage_1),),
+                )
+                conn.commit()
+                conn.close()
+                now_val = time.time() + 5
+                os.utime(db_path, (now_val, now_val))
+
+                res3 = monitor.sync()
+                self.assertEqual(res3.records_seen, 1)
+                count = monitor.store.conn.execute("SELECT COUNT(*) FROM usage_events WHERE source='pi'").fetchone()[0]
+                self.assertEqual(count, 2)
+            finally:
+                monitor.close()
+
+    def test_pi_health_reporting(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            empty_source = root / "opencode.db"
+            sqlite3.connect(empty_source).close()
+            config = dict(module.DEFAULT_CONFIG)
+            config["opencode_db"] = str(empty_source)
+            config["workbuddy_enabled"] = False
+            config["dsh_enabled"] = False
+            config["codex_enabled"] = False
+            config["antigravity_enabled"] = False
+            config["pi_enabled"] = True
+            config["pi_root"] = str(root / "no-such-pi")
+            monitor = module.Monitor(config, root / "monitor", module.logging.getLogger("test-pi-none"))
+            try:
+                self.assertIsNone(monitor.pi_root)
+                monitor.sync()
+                health = monitor.store.source_health_report(monitor.source_health)
+                self.assertIn("pi", health)
+                self.assertFalse(health["pi"]["available"])
+                self.assertEqual(health["pi"]["reason"], "not_found")
             finally:
                 monitor.close()
 

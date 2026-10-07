@@ -114,23 +114,30 @@ ANTIGRAVITY_PROVIDER_ID = "google"
 ANTIGRAVITY_SOURCE = "antigravity"
 ANTIGRAVITY_SOURCE_RANK = 6
 
+PI_PROCESS_NAMES = frozenset({"pi-desktop.exe", "pi-desktop-host-core.exe", "pi.exe"})
+PI_PROVIDER_ID = "pi"
+PI_SOURCE = "pi"
+PI_SOURCE_RANK = 6
+
 ALL_MONITORED_PROCESS_NAMES = (
     OPENCODE_PROCESS_NAMES
     | WORKBUDDY_PROCESS_NAMES
     | DSH_PROCESS_NAMES
     | CODEX_PROCESS_NAMES
     | ANTIGRAVITY_PROCESS_NAMES
+    | PI_PROCESS_NAMES
 )
 
 # Dashboard "source" selector values mapped to the raw ``usage_events.source``
-# values they cover. An empty selection means "all sources", which keeps the
-# original single-source behaviour intact.
+# values they cover. An empty selection means "all sources", technical single-source
+# behavior intact.
 SOURCE_GROUPS: dict[str, tuple[str, ...]] = {
     "opencode": ("v1", "v2"),
     WORKBUDDY_SOURCE: (WORKBUDDY_SOURCE,),
     DSH_SOURCE: (DSH_SOURCE,),
     CODEX_SOURCE: (CODEX_SOURCE,),
     ANTIGRAVITY_SOURCE: (ANTIGRAVITY_SOURCE,),
+    PI_SOURCE: (PI_SOURCE,),
 }
 SOURCE_LABELS: dict[str, str] = {
     "opencode": "OpenCode",
@@ -138,8 +145,16 @@ SOURCE_LABELS: dict[str, str] = {
     DSH_SOURCE: "DeepSeek Harness",
     CODEX_SOURCE: "Codex",
     ANTIGRAVITY_SOURCE: "Antigravity",
+    PI_SOURCE: "PI-Desktop",
 }
-SOURCE_ORDER: tuple[str, ...] = ("opencode", WORKBUDDY_SOURCE, DSH_SOURCE, CODEX_SOURCE, ANTIGRAVITY_SOURCE)
+SOURCE_ORDER: tuple[str, ...] = (
+    "opencode",
+    WORKBUDDY_SOURCE,
+    DSH_SOURCE,
+    CODEX_SOURCE,
+    ANTIGRAVITY_SOURCE,
+    PI_SOURCE,
+)
 DASHBOARD_WINDOW: Any = None
 PRICING_MEMORY: dict[str, Any] = {}
 PRICING_MEMORY_META: dict[str, Any] = {}
@@ -186,6 +201,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "codex_root": "",
     "antigravity_enabled": True,
     "antigravity_root": "",
+    "pi_enabled": True,
+    "pi_root": "",
     "sample_interval_seconds": 300,
     "daily_alert_tokens": 10_000_000,
     "spike_window_minutes": 30,
@@ -668,6 +685,41 @@ def detect_antigravity_root(config: dict[str, Any]) -> Path | None:
     return None
 
 
+def detect_pi_root(config: dict[str, Any]) -> Path | None:
+    """Locate the PI-Desktop data directory.
+
+    PI-Desktop stores its SQLite database at ``<root>/pi.sqlite`` and session logs
+    under ``<root>/sessions/<id>.jsonl``, defaulting to ``~/.pi-desktop``.
+    """
+    if not config.get("pi_enabled", True):
+        return None
+    configured = str(config.get("pi_root") or "").strip()
+    if configured:
+        p = Path(configured).expanduser()
+        if (p / "pi.sqlite").is_file() or (p / "sessions").is_dir():
+            return p.resolve()
+        return None
+    candidates: list[Path] = []
+    for env_var in ("PI_DESKTOP_HOME", "PI_HOME", "PI_DATA_DIR"):
+        val = os.environ.get(env_var)
+        if val:
+            p = Path(val).expanduser()
+            candidates.append(p)
+            candidates.append(p / ".pi-desktop")
+    home = Path.home()
+    candidates.extend(
+        [
+            home / ".pi-desktop",
+            home / "AppData" / "Roaming" / "PI-Desktop",
+            home / "AppData" / "Local" / "PI-Desktop",
+        ]
+    )
+    for candidate in candidates:
+        if (candidate / "pi.sqlite").is_file() or (candidate / "sessions").is_dir():
+            return candidate.resolve()
+    return None
+
+
 def is_opencode_process_name(name: str) -> bool:
     return name.strip().lower() in OPENCODE_PROCESS_NAMES
 
@@ -686,6 +738,10 @@ def is_codex_process_name(name: str) -> bool:
 
 def is_antigravity_process_name(name: str) -> bool:
     return name.strip().lower() in ANTIGRAVITY_PROCESS_NAMES
+
+
+def is_pi_process_name(name: str) -> bool:
+    return name.strip().lower() in PI_PROCESS_NAMES
 
 
 def _any_process_running(names: frozenset[str]) -> bool:
@@ -751,6 +807,10 @@ def codex_is_running() -> bool:
 
 def antigravity_is_running() -> bool:
     return _any_process_running(ANTIGRAVITY_PROCESS_NAMES)
+
+
+def pi_is_running() -> bool:
+    return _any_process_running(PI_PROCESS_NAMES)
 
 
 def any_source_running() -> bool:
@@ -1626,6 +1686,10 @@ class Monitor:
         self.antigravity_root = detect_antigravity_root(config)
         if self.antigravity_root:
             self.config["antigravity_root"] = str(self.antigravity_root)
+        self.pi_root = detect_pi_root(config)
+        if self.pi_root:
+            self.config["pi_root"] = str(self.pi_root)
+        self._pending_pi_mtime: float | None = None
 
     def _read_source_rows(self, full: bool) -> tuple[list[UsageRecord], dict[str, int]]:
         records: list[UsageRecord] = []
@@ -1635,11 +1699,13 @@ class Monitor:
         self._pending_workbuddy_cursors: dict[str, int] = {}
         self._pending_codex_cursors: dict[str, dict[str, Any]] = {}
         self._pending_antigravity_cursors: dict[str, dict[str, Any]] = {}
+        self._pending_pi_mtime: float | None = None
         watermarks.update(self._read_opencode_rows(records, full))
         watermarks.update(self._read_workbuddy_rows(records, full))
         watermarks.update(self._read_dsh_rows(records, full))
         watermarks.update(self._read_codex_rows(records, full))
         watermarks.update(self._read_antigravity_rows(records, full))
+        watermarks.update(self._read_pi_rows(records, full))
         return records, watermarks
 
     def _flush_workbuddy_cursors(self) -> None:
@@ -2778,6 +2844,238 @@ class Monitor:
 
         return watermarks
 
+    # --- PI-Desktop ----------------------------------------------------------
+    def _flush_pi_cursors(self) -> None:
+        pending = getattr(self, "_pending_pi_mtime", None)
+        if pending is not None:
+            self.store.set_meta("pi_last_mtime", str(pending))
+            self._pending_pi_mtime = None
+
+    def _read_pi_rows(
+        self, records: list[UsageRecord], full: bool
+    ) -> dict[str, int]:
+        """Read PI-Desktop SQLite database (turns and sessions).
+
+        PI-Desktop persists turns and usage in ``<pi_root>/pi.sqlite``.
+        Scheduled tasks and interactive sessions create turns with ``usage_json``
+        storing operations token counters (input, output, reasoning, cache read/write).
+        """
+        if not self.pi_root:
+            if config_enabled := bool(self.config.get("pi_enabled", True)):
+                self.source_health[PI_SOURCE] = {
+                    "available": False,
+                    "reason": "not_found",
+                    "detail": str(self.config.get("pi_root") or "~/.pi-desktop"),
+                }
+            return {}
+        db_path = self.pi_root / "pi.sqlite"
+        if not db_path.is_file():
+            self.source_health[PI_SOURCE] = {
+                "available": False,
+                "reason": "no_pi_database",
+                "detail": str(db_path),
+            }
+            return {}
+        self.source_health[PI_SOURCE] = {"available": True, "reason": "", "detail": ""}
+
+        try:
+            stat = db_path.stat()
+        except OSError as exc:
+            self.logger.warning("Cannot stat PI-Desktop database %s: %s", db_path, exc)
+            return {}
+
+        effective_mtime = stat.st_mtime
+        wal_path = Path(str(db_path) + "-wal")
+        if wal_path.is_file():
+            try:
+                wal_mtime = wal_path.stat().st_mtime
+                if wal_mtime > effective_mtime:
+                    effective_mtime = wal_mtime
+            except OSError:
+                pass
+
+        saved_mtime = safe_float(self.store.get_meta("pi_last_mtime", "0"))
+        if not full and effective_mtime <= saved_mtime:
+            return {}
+
+        watermarks: dict[str, int] = {}
+        old = safe_int(self.store.get_meta(f"watermark_{PI_SOURCE}", "0"))
+        threshold = 0 if full else old
+        op = ">=" if (full or old == 0) else ">"
+
+        uri = f"file:{db_path.as_posix()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA query_only=ON")
+
+            providers_map: dict[str, str] = {}
+            try:
+                for p_row in conn.execute("SELECT id, name, vendor_key FROM providers"):
+                    p_id = str(p_row["id"] or "")
+                    name = str(p_row["name"] or p_row["vendor_key"] or "").strip()
+                    if name:
+                        providers_map[p_id] = name
+            except (sqlite3.DatabaseError, OSError) as exc:
+                self.logger.warning("Cannot read PI-Desktop providers %s: %s", db_path, exc)
+
+            task_titles: dict[str, str] = {}
+            try:
+                for tr_row in conn.execute(
+                    "SELECT tr.session_id, st.title FROM task_runs tr JOIN scheduled_tasks st ON tr.task_id = st.id"
+                ):
+                    sid = str(tr_row["session_id"] or "")
+                    title = str(tr_row["title"] or "").strip()
+                    if sid and title:
+                        task_titles[sid] = title
+            except (sqlite3.DatabaseError, OSError):
+                pass
+
+            sql = f"""
+                SELECT 
+                    t.id AS turn_id,
+                    t.session_id,
+                    t.status,
+                    t.provider_id AS turn_provider_id,
+                    t.model_id AS turn_model_id,
+                    t.input_tokens AS turn_input_tokens,
+                    t.output_tokens AS turn_output_tokens,
+                    t.usage_json,
+                    t.started_at,
+                    t.ended_at,
+                    s.project_id,
+                    s.provider_id AS session_provider_id,
+                    s.model_id AS session_model_id,
+                    s.title AS session_title,
+                    p.name AS project_name,
+                    p.path AS project_path
+                FROM turns t
+                LEFT JOIN sessions s ON t.session_id = s.id
+                LEFT JOIN projects p ON s.project_id = p.id
+                WHERE (COALESCE(t.ended_at, t.started_at) {op} ?) AND t.usage_json IS NOT NULL
+                ORDER BY COALESCE(t.ended_at, t.started_at) ASC
+            """
+            rows = conn.execute(sql, (threshold,)).fetchall()
+            for row in rows:
+                turn_id = str(row["turn_id"] or "")
+                session_id = str(row["session_id"] or "")
+                started_at = safe_int(row["started_at"])
+                ended_at = safe_int(row["ended_at"])
+                event_time = ended_at if ended_at > 0 else started_at
+                source_created = started_at if started_at > 0 else event_time
+                source_updated = ended_at if ended_at > 0 else event_time
+
+                p_name = str(row["project_name"] or "").strip()
+                p_path = str(row["project_path"] or "").strip()
+                s_title = task_titles.get(session_id) or str(row["session_title"] or "").strip()
+                project_name = p_name or s_title or "pi"
+                project_path = p_path
+                project_id = str(row["project_id"] or "") if row["project_id"] is not None else (session_id or "pi")
+
+                usage_raw = row["usage_json"]
+                usage_dict: dict[str, Any] = {}
+                if usage_raw:
+                    try:
+                        usage_dict = json.loads(usage_raw)
+                    except (json.JSONDecodeError, TypeError):
+                        usage_dict = {}
+
+                operations = usage_dict.get("operations")
+                if isinstance(operations, list) and operations:
+                    for idx, op in enumerate(operations):
+                        if not isinstance(op, dict):
+                            continue
+                        mid = f"pi:{session_id}:{turn_id}:{idx}"
+                        op_model = str(op.get("modelId") or row["turn_model_id"] or row["session_model_id"] or "unknown").strip()
+                        op_provider_ref = str(op.get("providerId") or row["turn_provider_id"] or row["session_provider_id"] or "").strip()
+                        provider_id = providers_map.get(op_provider_ref) or PricingCatalog._canonical_provider(op_model) or PI_PROVIDER_ID
+
+                        inp = safe_int(op.get("inputTokens", 0))
+                        reasoning = safe_int(op.get("reasoningTokens", 0))
+                        out_raw = safe_int(op.get("outputTokens", 0))
+                        output = max(0, out_raw - reasoning)
+                        cache_read = safe_int(op.get("cacheReadTokens", 0))
+                        cache_write = safe_int(op.get("cacheWriteTokens", 0))
+
+                        cost = 0.0
+                        c_obj = op.get("cost")
+                        if isinstance(c_obj, dict) and "total" in c_obj:
+                            try:
+                                cost = float(c_obj["total"])
+                            except (ValueError, TypeError):
+                                cost = 0.0
+
+                        rec = UsageRecord(
+                            message_id=mid,
+                            source=PI_SOURCE,
+                            source_rank=PI_SOURCE_RANK,
+                            session_id=session_id,
+                            project_id=project_id,
+                            project_name=project_name,
+                            project_path=project_path,
+                            provider_id=provider_id,
+                            model_id=op_model,
+                            variant="default",
+                            agent="pi",
+                            event_time=event_time,
+                            source_created=source_created,
+                            source_updated=source_updated,
+                            input_tokens=inp,
+                            output_tokens=output,
+                            reasoning_tokens=reasoning,
+                            cache_read_tokens=cache_read,
+                            cache_write_tokens=cache_write,
+                            cost=cost,
+                        )
+                        records.append(rec)
+                        if rec.event_time > watermarks.get(PI_SOURCE, 0):
+                            watermarks[PI_SOURCE] = rec.event_time
+                else:
+                    mid = f"pi:{session_id}:{turn_id}:0"
+                    turn_model = str(row["turn_model_id"] or row["session_model_id"] or "unknown").strip()
+                    turn_provider_ref = str(row["turn_provider_id"] or row["session_provider_id"] or "").strip()
+                    provider_id = providers_map.get(turn_provider_ref) or PricingCatalog._canonical_provider(turn_model) or PI_PROVIDER_ID
+                    inp = safe_int(row["turn_input_tokens"] or 0)
+                    reasoning = safe_int(usage_dict.get("reasoningTokens", 0))
+                    out_raw = safe_int(row["turn_output_tokens"] or 0)
+                    output = max(0, out_raw - reasoning)
+                    cache_read = safe_int(usage_dict.get("cacheReadTokens", 0))
+                    cache_write = safe_int(usage_dict.get("cacheWriteTokens", 0))
+
+                    rec = UsageRecord(
+                        message_id=mid,
+                        source=PI_SOURCE,
+                        source_rank=PI_SOURCE_RANK,
+                        session_id=session_id,
+                        project_id=project_id,
+                        project_name=project_name,
+                        project_path=project_path,
+                        provider_id=provider_id,
+                        model_id=turn_model,
+                        variant="default",
+                        agent="pi",
+                        event_time=event_time,
+                        source_created=source_created,
+                        source_updated=source_updated,
+                        input_tokens=inp,
+                        output_tokens=output,
+                        reasoning_tokens=reasoning,
+                        cache_read_tokens=cache_read,
+                        cache_write_tokens=cache_write,
+                        cost=0.0,
+                    )
+                    records.append(rec)
+                    if rec.event_time > watermarks.get(PI_SOURCE, 0):
+                        watermarks[PI_SOURCE] = rec.event_time
+            self._pending_pi_mtime = effective_mtime
+        except (sqlite3.DatabaseError, OSError) as exc:
+            self.logger.warning("Error reading PI-Desktop database %s: %s", db_path, exc)
+        finally:
+            conn.close()
+
+        return watermarks
+
     def _initial_import_done(self) -> bool:
         return self.store.get_meta("initialized") == "1"
 
@@ -2869,6 +3167,7 @@ class Monitor:
             self._flush_workbuddy_cursors()
             self._flush_codex_cursors()
             self._flush_antigravity_cursors()
+            self._flush_pi_cursors()
             if full:
                 self.store.set_meta("last_full_reconcile", str(now_ms()))
             if not self._initial_import_done():
@@ -2914,6 +3213,7 @@ class Monitor:
             "dsh_running": dsh_is_running(),
             "codex_running": codex_is_running(),
             "antigravity_running": antigravity_is_running(),
+            "pi_running": pi_is_running(),
             "day": day,
             "today": self.store.summary(day_start, day_end),
             "past_24h": self.store.summary(past_24h_start, timestamp + 1),
@@ -3327,6 +3627,7 @@ def status_text(status: dict[str, Any], maximum: float) -> str:
     dsh = bool(status.get("dsh_running"))
     codex = bool(status.get("codex_running"))
     antigravity = bool(status.get("antigravity_running"))
+    pi = bool(status.get("pi_running"))
     last_sync = (
         datetime.fromtimestamp(status["last_sync"] / 1000).astimezone().isoformat(timespec="seconds")
         if status["last_sync"]
@@ -3336,10 +3637,11 @@ def status_text(status: dict[str, Any], maximum: float) -> str:
         (
             f"{APP_NAME} {VERSION}",
             f"OpenCode: {'running' if running else 'stopped'}"
-            f" | WorkBuddy: {'running' if workbuddy else 'stopped'}"
+            f" | WB: {'running' if workbuddy else 'stopped'}"
             f" | DSH: {'running' if dsh else 'stopped'}"
             f" | Codex: {'running' if codex else 'stopped'}"
-            f" | AGY: {'running' if antigravity else 'stopped'}",
+            f" | AGY: {'running' if antigravity else 'stopped'}"
+            f" | PI: {'running' if pi else 'stopped'}",
             f"Today: {format_int(today['total_with_cache'])} tokens",
             f"Cache read: {format_int(today['cache_read_tokens'])}",
             f"Synced: {last_sync}",
@@ -3700,6 +4002,7 @@ def run_tray(config_path: Path, companion: bool = False) -> int:
         print(f"DeepSeek Harness: {'运行中' if status.get('dsh_running') else '未运行'}")
         print(f"Codex: {'运行中' if status.get('codex_running') else '未运行'}")
         print(f"Antigravity: {'运行中' if status.get('antigravity_running') else '未运行'}")
+        print(f"PI-Desktop: {'运行中' if status.get('pi_running') else '未运行'}")
         print(f"Monitor: {state}")
         print(f"Today: {format_int(today['total_with_cache'])} (cache included)")
         print(f"No cache read: {format_int(today['total_without_cache_read'])}")
@@ -4373,6 +4676,8 @@ class DashboardApi:
                     "codex_root": str(config.get("codex_root", "")),
                     "antigravity_running": antigravity_is_running(),
                     "antigravity_root": str(config.get("antigravity_root", "")),
+                    "pi_running": pi_is_running(),
+                    "pi_root": str(config.get("pi_root", "")),
                     "source_health": store.source_health_report(probe_health),
                     "last_sync": last_sync,
                     "last_sync_text": datetime.fromtimestamp(last_sync / 1000).astimezone().strftime("%Y-%m-%d %H:%M:%S") if last_sync else "尚未同步",
@@ -4443,6 +4748,7 @@ class DashboardApi:
             "dsh_running": dsh_is_running(),
             "codex_running": codex_is_running(),
             "antigravity_running": antigravity_is_running(),
+            "pi_running": pi_is_running(),
         }
 
     def refresh(self) -> dict[str, Any]:
@@ -4464,6 +4770,7 @@ class DashboardApi:
             "dsh_running": dsh_is_running(),
             "codex_running": codex_is_running(),
             "antigravity_running": antigravity_is_running(),
+            "pi_running": pi_is_running(),
         }
 
     def set_theme(self, theme: str) -> dict[str, str]:
@@ -4820,6 +5127,7 @@ def print_status(monitor: Monitor, as_json: bool = False) -> None:
         ("DeepSeek", monitor.dsh_root),
         ("Codex", monitor.codex_root),
         ("Antigravity", monitor.antigravity_root),
+        ("PI-Desktop", monitor.pi_root),
     ):
         print(f"{label}: {root or '<not found>'}")
     print(f"Data:   {monitor.data_dir}")
@@ -4906,6 +5214,7 @@ def main(argv: list[str] | None = None) -> int:
             ("dsh_root", detect_dsh_root),
             ("codex_root", detect_codex_root),
             ("antigravity_root", detect_antigravity_root),
+            ("pi_root", detect_pi_root),
         ):
             root = detect(config)
             print(f"{label}={root or '<not found>'}")

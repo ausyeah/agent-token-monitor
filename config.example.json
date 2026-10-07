@@ -8,6 +8,8 @@
   "codex_root": "",
   "antigravity_enabled": true,
   "antigravity_root": "",
+  "pi_enabled": true,
+  "pi_root": "",
   "sample_interval_seconds": 300,
   "daily_alert_tokens": 10000000,
   "spike_window_minutes": 30,
