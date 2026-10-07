@@ -67,6 +67,7 @@ EMPTY_AGGREGATE_ROW = {
     "total_with_cache": 0,
     "total_without_cache_read": 0,
     "cost": 0.0,
+    "models": [],
 }
 MUTEX_NAME = "Local\\AgentTokenMonitorSingleton"
 SYNC_MUTEX_NAME = "Local\\AgentTokenMonitorDataWriter"
@@ -4385,6 +4386,12 @@ def attach_model_dev_costs(
     )
     summary = _empty_cost_bucket()
     trend: dict[str, dict[str, Any]] = {str(row["bucket"]): _empty_cost_bucket() for row in analytics["trend"]}
+    trend_models: dict[str, dict[str, int]] = {str(row["bucket"]): {} for row in analytics["trend"]}
+    daily_models: dict[str, dict[str, int]] = (
+        {str(row["bucket"]): {} for row in daily_trend}
+        if daily_trend and daily_bucket_of
+        else {}
+    )
     providers: dict[str, dict[str, Any]] = {str(row["name"]): _empty_cost_bucket() for row in analytics["providers"]}
     models: dict[tuple[str, str, str], dict[str, Any]] = {
         (str(row["provider_id"]), str(row["model_id"]), str(row["variant"])): _empty_cost_bucket() for row in analytics["models"]
@@ -4400,12 +4407,18 @@ def attach_model_dev_costs(
         _merge_cost(summary, row, calculated)
         event_dt = datetime.fromtimestamp(safe_int(row["event_time"]) / 1000).astimezone()
         bucket = event_dt.strftime("%Y-%m-%d %H:00" if granularity == "hour" else "%Y-%m-%d")
+        model_name = str(row.get("model_id") or "unknown").strip()
+        tokens = safe_int(row.get("total_with_cache", 0))
         if bucket in trend:
             _merge_cost(trend[bucket], row, calculated)
+            if model_name:
+                trend_models[bucket][model_name] = trend_models[bucket].get(model_name, 0) + tokens
         if daily_buckets:
             day = daily_bucket_of(safe_int(row["event_time"]))
             if day in daily_buckets:
                 _merge_cost(daily_buckets[day], row, calculated)
+                if model_name:
+                    daily_models[day][model_name] = daily_models[day].get(model_name, 0) + tokens
         provider = str(row["provider_id"] or "")
         if provider in providers:
             _merge_cost(providers[provider], row, calculated)
@@ -4419,8 +4432,20 @@ def attach_model_dev_costs(
     analytics["summary"].update(_finish_cost(summary))
     for row in analytics["trend"]:
         row.update(_finish_cost(trend.get(str(row["bucket"]), _empty_cost_bucket())))
+        b_models = trend_models.get(str(row["bucket"]), {})
+        row["models"] = [
+            {"name": k, "tokens": v}
+            for k, v in sorted(b_models.items(), key=lambda item: item[1], reverse=True)
+            if v > 0
+        ]
     for row in daily_trend or []:
         row.update(_finish_cost(daily_buckets.get(str(row["bucket"]), _empty_cost_bucket())))
+        b_models = daily_models.get(str(row["bucket"]), {})
+        row["models"] = [
+            {"name": k, "tokens": v}
+            for k, v in sorted(b_models.items(), key=lambda item: item[1], reverse=True)
+            if v > 0
+        ]
     for row in analytics["providers"]:
         row.update(_finish_cost(providers.get(str(row["name"]), _empty_cost_bucket())))
     for row in analytics["models"]:

@@ -9,6 +9,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from unittest import mock
 from datetime import datetime
 from pathlib import Path
 
@@ -2408,6 +2409,95 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(health["pi"]["reason"], "not_found")
             finally:
                 monitor.close()
+
+    def test_dashboard_trend_models_breakdown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config_file = root / "config.json"
+            cfg = dict(module.DEFAULT_CONFIG)
+            cfg["pi_enabled"] = False
+            cfg["workbuddy_enabled"] = False
+            cfg["dsh_enabled"] = False
+            cfg["codex_enabled"] = False
+            cfg["antigravity_enabled"] = False
+            config_file.write_text(json.dumps(cfg), encoding="utf-8")
+
+            monitor_dir = root / "monitor"
+            monitor_dir.mkdir()
+            store = module.Store(monitor_dir)
+            t = int(datetime.now().astimezone().replace(hour=10, minute=30, second=0, microsecond=0).timestamp() * 1000)
+
+            rec1 = module.UsageRecord(
+                message_id="m-1",
+                source="opencode",
+                source_rank=1,
+                session_id="s1",
+                project_id="p1",
+                project_name="proj",
+                project_path="",
+                provider_id="openai",
+                model_id="gpt-4o",
+                variant="default",
+                agent="code",
+                event_time=t,
+                source_created=t,
+                source_updated=t,
+                input_tokens=1000,
+                output_tokens=500,
+                reasoning_tokens=0,
+                cache_read_tokens=200,
+                cache_write_tokens=0,
+                cost=0.01,
+            )
+            rec2 = module.UsageRecord(
+                message_id="m-2",
+                source="opencode",
+                source_rank=1,
+                session_id="s1",
+                project_id="p1",
+                project_name="proj",
+                project_path="",
+                provider_id="google",
+                model_id="gemini-flash",
+                variant="default",
+                agent="code",
+                event_time=t + 1000,
+                source_created=t + 1000,
+                source_updated=t + 1000,
+                input_tokens=2000,
+                output_tokens=800,
+                reasoning_tokens=100,
+                cache_read_tokens=500,
+                cache_write_tokens=0,
+                cost=0.005,
+            )
+            store.conn.execute("BEGIN")
+            store.upsert_event(rec1)
+            store.upsert_event(rec2)
+            store.conn.commit()
+            store.close()
+
+            # Mock app_data_dir to point to monitor_dir
+            with mock.patch("agent_token_monitor.app_data_dir", return_value=monitor_dir):
+                api = module.DashboardApi(config_file)
+                dash = api.get_dashboard("today")
+                # Find the hour bucket
+                active_trend = [b for b in dash["trend"] if b.get("total_with_cache", 0) > 0]
+                self.assertEqual(len(active_trend), 1)
+                hour_models = active_trend[0].get("models", [])
+                self.assertEqual(len(hour_models), 2)
+                # Should be sorted descending by total_with_cache (gemini-flash 3400 > gpt-4o 1700)
+                self.assertEqual(hour_models[0]["name"], "gemini-flash")
+                self.assertEqual(hour_models[0]["tokens"], 3400)
+                self.assertEqual(hour_models[1]["name"], "gpt-4o")
+                self.assertEqual(hour_models[1]["tokens"], 1700)
+
+                # Daily trend
+                daily_active = [b for b in dash["daily_trend"] if b.get("total_with_cache", 0) > 0]
+                self.assertEqual(len(daily_active), 1)
+                daily_models = daily_active[0].get("models", [])
+                self.assertEqual(len(daily_models), 2)
+                self.assertEqual(daily_models[0]["name"], "gemini-flash")
 
 if __name__ == "__main__":
     unittest.main()
