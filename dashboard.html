@@ -144,9 +144,6 @@
     /* Additive: source switcher, hidden unless two or more sources exist. */
     #source-field select { min-width: 132px; }
     #source-field[hidden] { display: none; }
-    .control-quick-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-left: auto; }
-    .quick-button { height: 34px; padding: 0 11px; color: var(--text-soft); background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
-    .quick-button:hover { color: var(--text); border-color: var(--accent); }
     .active-filter-summary { display: block; margin: -3px 0 10px; padding: 5px 10px; color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--warning) 22%, var(--border)); border-radius: 999px; font-size: 10px; cursor: pointer; }
     .active-filter-summary[hidden] { display: none; }
     /* Additive: surfaces a source that is configured but unreadable, so a
@@ -459,7 +456,6 @@
       body[data-layout="compact"] .detail-search { width: min(58vw, 230px); }
       body[data-layout="compact"] .detail-actions { gap: 8px; }
       body[data-layout="compact"] #reset-button { display: none; }
-      body[data-layout="compact"] .control-quick-actions { margin-left: 0; }
       body[data-layout="compact"] .compact-hero { padding: 12px 16px; }
       body[data-layout="compact"] .compact-number { font-size: 34px; }
       body[data-layout="compact"] .compact-stats { margin-top: 10px; gap: 6px; }
@@ -571,7 +567,6 @@
       <div class="filter-field" id="model-field"><label for="model-filter">模型</label><select id="model-filter"><option>全部模型</option></select></div>
       <div class="filter-field" id="source-field"><select id="source-filter" aria-label="数据来源"><option value="">全部来源</option></select></div>
       <button id="reset-button" class="soft-button">重置筛选</button>
-      <div class="control-quick-actions"><button id="mini-card-quick-button" class="quick-button" title="一键缩成最小卡片">卡片</button><button id="settings-quick-button" class="quick-button" title="打开系统设置">设置</button><button id="pricing-quick-button" class="quick-button" title="打开价格设置">价格</button><button id="currency-quick-button" class="quick-button" title="切换美元/人民币">$</button></div>
     </section>
     <button id="active-filter-summary" class="active-filter-summary" hidden></button>
     <div id="source-warning" class="source-warning" hidden></div>
@@ -761,7 +756,7 @@
       const changeText = (item) => { if (!item) return "上一周期无对比数据"; if (item.change_percent == null) return `上一周期 ${compactFmt(item.previous)}`; const sign=item.change_percent>0?"+":""; return `较上一周期 ${sign}${Number(item.change_percent).toFixed(1)}%`; };
       const localDate = (date) => new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,10);
       const pricingModeLabel = (mode) => ({official:"官方价格", multiplier:"官方价格 × 倍率", custom:"完全自定义价格"})[mode] || "官方价格";
-      const updateCurrencyButton = () => { const button=$("#currency-button"); if(!button)return; $("#currency-label").textContent=displayCurrency==="CNY"?"¥":"$"; const quick=$("#currency-quick-button"); if(quick)quick.textContent=displayCurrency==="CNY"?"¥":"$"; button.title=`当前显示：${displayCurrency==="CNY"?"人民币":"美元"}，点击切换`; };
+      const updateCurrencyButton = () => { const button=$("#currency-button"); if(!button)return; $("#currency-label").textContent=displayCurrency==="CNY"?"¥":"$"; button.title=`当前显示：${displayCurrency==="CNY"?"人民币":"美元"}，点击切换`; };
       const setPricingMode = (mode) => {
         const normalized = ["official","multiplier","custom"].includes(mode) ? mode : "official";
         $$(".pricing-mode").forEach(button => button.classList.toggle("active", button.dataset.pricingMode === normalized));
@@ -1216,16 +1211,13 @@
           }
         };
         $("#mini-card-button")?.addEventListener("click", shrinkToCard);
-        $("#mini-card-quick-button")?.addEventListener("click", shrinkToCard);
-        const toggleCurrency = async()=>{try{const next=displayCurrency==="CNY"?"USD":"CNY";const result=await callApi("set_display_currency",next,usdCnyRate);displayCurrency=result.display_currency;usdCnyRate=Number(result.usd_cny_rate||usdCnyRate);updateCurrencyButton();$("#currency-quick-button").textContent=displayCurrency==="CNY"?"¥":"$";await loadView();toast(next==="CNY"?`已切换人民币，1 USD = ${usdCnyRate.toFixed(4)} CNY`:"已切换美元");}catch(error){toast(`切换货币失败：${error}`);}};
-        $("#currency-button").addEventListener("click",toggleCurrency); $("#currency-quick-button").addEventListener("click",toggleCurrency);
-        $("#pricing-quick-button").addEventListener("click",openPricingSettings);
+        const toggleCurrency = async()=>{try{const next=displayCurrency==="CNY"?"USD":"CNY";const result=await callApi("set_display_currency",next,usdCnyRate);displayCurrency=result.display_currency;usdCnyRate=Number(result.usd_cny_rate||usdCnyRate);updateCurrencyButton();await loadView();toast(next==="CNY"?`已切换人民币，1 USD = ${usdCnyRate.toFixed(4)} CNY`:"已切换美元");}catch(error){toast(`切换货币失败：${error}`);}};
+        $("#currency-button").addEventListener("click",toggleCurrency);
         $("#pricing-button").addEventListener("click",openPricingSettings); $("#pricing-close").addEventListener("click",closePricingSettings); $("#pricing-cancel").addEventListener("click",closePricingSettings); $("#pricing-backdrop").addEventListener("click",closePricingSettings);
         $$(".pricing-mode").forEach(button => button.addEventListener("click",()=>setPricingMode(button.dataset.pricingMode)));
         $("#add-custom-price").addEventListener("click",()=>{state.pricingDraftRows.push({provider:"",model:"",variant:"default",rates:{}});renderPricingRows();setPricingMode("custom");});
         $("#pricing-save").addEventListener("click",async()=>{try{const settings=collectPricingSettings();await callApi("save_pricing_settings",settings);closePricingSettings();await loadView();toast("价格设置已保存并重新计算");}catch(error){toast(`保存价格设置失败：${error}`);}});
         $("#pricing-reset").addEventListener("click",async()=>{try{await callApi("save_pricing_settings",{mode:"official",multiplier:1,display_currency:displayCurrency,usd_cny_rate:usdCnyRate,default_rates:{},models:[]});closePricingSettings();await loadView();toast("已恢复官方价格");}catch(error){toast(`恢复官方价格失败：${error}`);}});
-        $("#settings-quick-button").addEventListener("click",openAppSettings);
         $("#settings-button").addEventListener("click",openAppSettings);
         $("#settings-close").addEventListener("click",closeAppSettings);
         $("#settings-cancel").addEventListener("click",closeAppSettings);
